@@ -1,4 +1,5 @@
 import axios from "axios";
+import type { ReceiptSettings } from "./Settings/receiptSettingsApi";
 import type { OrderSettings } from "./Settings/orderSettingsApi";
 import type { PosTaxSettings } from "./Settings/taxSettingsApi";
 import type { HardwareSettings } from "./Settings/hardwareSettingsApi";
@@ -19,7 +20,14 @@ export interface SaleLineItem {
   description: string;
   qty: number;
   unit_price: number;
+  /** Net of this line's own discount. */
   line_total: number;
+  /** "percent" or "amount" (amount is per unit). */
+  discount_type?: "percent" | "amount" | null;
+  /** What was entered: 10 for 10%, or 50 for Rs 50 per unit. */
+  discount_value?: number | null;
+  /** Money actually taken off the line. Recomputed by the server on save. */
+  discount_amount?: number | null;
   imei_serial?: string | null;
   batch_id?: string | null;
   item_batch_id?: number | null;
@@ -77,6 +85,9 @@ export interface Sale {
   amount_received?: number | null;
   bank_id?: number | null;
   cheque_number?: string | null;
+  /** Bank the cheque is drawn on. Stored with the sale and shown on the
+   *  receipt, so a bounced cheque can be traced back to its invoice. */
+  bank_name?: string | null;
   refund_card_last4?: string | null;
   notes?: string | null;
   items?: SaleLineItem[];
@@ -150,6 +161,8 @@ export interface SaleReceiptLine {
   qty: number;
   unit_price: number;
   line_total: number;
+  /** Money taken off the line by its own discount. */
+  discount_amount?: number;
   uom?: string | null;
 }
 
@@ -158,6 +171,8 @@ export interface SaleReceiptLabels {
   sales_id: string;
   date: string;
   location: string;
+  /** Who rang up the sale. */
+  cashier: string;
   customer: string;
   item_no: string;
   description: string;
@@ -173,6 +188,8 @@ export interface SaleReceiptLabels {
   payment: string;
   received: string;
   change: string;
+  /** Caption for the total discount, printed as a goodwill line. */
+  you_saved: string;
   thank_you: string;
 }
 
@@ -194,6 +211,15 @@ export interface SaleReceiptApiPayload {
     show_barcode?: boolean;
     barcode_value?: string | null;
     discount_label?: string | null;
+    /** Present only for a split payment: each method and what it covered. */
+    payment_splits?: {
+      payment_method: string;
+      amount: number;
+      bank_name?: string | null;
+      cheque_number?: string | null;
+    }[];
+    /** A quotation is a price promise: nothing paid, no stock moved. */
+    is_quotation?: boolean;
   };
   header: CompanyPrintHeader & { source?: string };
   hardware_settings: HardwareSettings;
@@ -207,6 +233,9 @@ export interface SaleReceiptApiPayload {
     allow_logo_on_sales_receipt: boolean;
   };
   labels: SaleReceiptLabels;
+  /** The shop's receipt layout. Optional so a receipt payload cached or
+   *  returned by an older backend still renders, falling back to defaults. */
+  receipt_settings?: ReceiptSettings;
 }
 
 export interface PosItemSearchResult {
@@ -241,6 +270,15 @@ export type SalePayload = {
   amount_received?: number | null;
   bank_id?: number | null;
   cheque_number?: string | null;
+  /** Bank the cheque is drawn on. */
+  bank_name?: string | null;
+  /** Two or more methods adding up to the total. Sent with payment_method "Split". */
+  payment_splits?: {
+    payment_method: string;
+    amount: number;
+    cheque_number?: string | null;
+    bank_name?: string | null;
+  }[];
   refund_card_last4?: string | null;
   hold_pin?: string;
   notes?: string | null;

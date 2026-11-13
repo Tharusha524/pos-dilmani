@@ -17,6 +17,7 @@ import ItemSettings from "./pages/ItemSettings";
 import InventorySettings from "./pages/InventorySettings";
 import OrderSettings from "./pages/OrderSettings";
 import HardwareSettings from "./pages/HardwareSettings";
+import ReceiptSettings from "./pages/ReceiptSettings";
 import EmployeeSettings from "./pages/EmployeeSettings";
 import MultipleSystemsSettings from "./pages/MultipleSystemsSettings";
 import RepairSettings from "./pages/RepairSettings";
@@ -67,6 +68,7 @@ const Settings: React.FC = () => {
         <Route path="inventory" element={<InventorySettings />} />
         <Route path="order" element={<OrderSettings />} />
         <Route path="hardware" element={<HardwareSettings />} />
+        <Route path="receipt" element={<ReceiptSettings />} />
         <Route path="employee" element={<EmployeeSettings />} />
         <Route path="multiple-systems" element={<MultipleSystemsSettings />} />
         <Route path="repair" element={<RepairSettings />} />

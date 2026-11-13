@@ -62,6 +62,7 @@ class OrderSettingController extends Controller
                 'allow_editing_of_hold_orders' => 'nullable|boolean',
                 'hold_order_pin' => 'nullable|string|max:20',
                 'allow_order_discount' => 'nullable|boolean',
+                'allow_sale_below_cost' => 'nullable|boolean',
             ]);
 
             $data = $this->orderSettingService->updateForUser(

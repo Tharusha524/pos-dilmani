@@ -10,6 +10,7 @@ use App\Http\Controllers\Api\ItemSettingController;
 use App\Http\Controllers\Api\InventorySettingController;
 use App\Http\Controllers\Api\OrderSettingController;
 use App\Http\Controllers\Api\HardwareSettingController;
+use App\Http\Controllers\Api\ReceiptSettingController;
 use App\Http\Controllers\Api\EmployeeSettingController;
 use App\Http\Controllers\Api\EmployeeController;
 use App\Http\Controllers\Api\CustomerNotificationSettingController;
@@ -109,6 +110,11 @@ Route::middleware(['auth:sanctum', 'throttle:120,1'])->group(function () {
         Route::delete('/settings/hardware/logo-80mm', [HardwareSettingController::class, 'deleteLogo80mm']);
         Route::post('/settings/hardware/logo-a4', [HardwareSettingController::class, 'uploadLogoA4']);
         Route::delete('/settings/hardware/logo-a4', [HardwareSettingController::class, 'deleteLogoA4']);
+
+        // POS settings – printed receipt layout
+        Route::get('/settings/receipt', [ReceiptSettingController::class, 'show']);
+        Route::put('/settings/receipt', [ReceiptSettingController::class, 'update']);
+        Route::post('/settings/receipt/reset', [ReceiptSettingController::class, 'reset']);
 
         // POS settings – employee
         Route::get('/settings/employee', [EmployeeSettingController::class, 'show']);
@@ -270,6 +276,8 @@ Route::middleware(['auth:sanctum', 'throttle:120,1'])->group(function () {
 
         // Items (inventory dashboard)
         Route::get('/items/pos-search', [ItemController::class, 'posSearch']);
+        Route::get('/items/barcode-lookup', [ItemController::class, 'barcodeLookup']);
+        Route::get('/items/next-barcode', [ItemController::class, 'nextBarcode']);
         Route::get('/items', [ItemController::class, 'index']);
         Route::get('/items/next-number', [ItemController::class, 'nextNumber']);
         Route::get('/items/categories', [ItemController::class, 'categories']);

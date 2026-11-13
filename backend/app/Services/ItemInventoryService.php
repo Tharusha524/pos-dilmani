@@ -798,8 +798,10 @@ class ItemInventoryService
                     'item_id' => $item->id,
                     'name' => $name,
                     'amount' => max(0, (float) ($row['amount'] ?? 0)),
+                    // Default applied to the value as well as the check — reading
+                    // the raw key again crashed when charge_type was not sent.
                     'charge_type' => in_array($row['charge_type'] ?? 'fixed', ['fixed', 'percent'], true)
-                        ? $row['charge_type']
+                        ? ($row['charge_type'] ?? 'fixed')
                         : 'fixed',
                     'is_active' => (bool) ($row['is_active'] ?? true),
                 ]);

@@ -28,6 +28,7 @@ import HelpOutlineIcon from "@mui/icons-material/HelpOutline";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import MoreHorizIcon from "@mui/icons-material/MoreHoriz";
 import PrintIcon from "@mui/icons-material/Print";
+import QrCode2Icon from "@mui/icons-material/QrCode2";
 import SettingsIcon from "@mui/icons-material/Settings";
 import FileDownloadIcon from "@mui/icons-material/FileDownload";
 import ViewColumnIcon from "@mui/icons-material/ViewColumn";
@@ -58,6 +59,7 @@ type ColumnKey =
   | "description"
   | "category"
   | "sub_category"
+  | "barcode"
   | "uom"
   | "qty"
   | "expiry"
@@ -70,6 +72,7 @@ const ALL_COLUMNS: { key: ColumnKey; label: string; align?: "right" | "center" }
   { key: "description", label: "Description" },
   { key: "category", label: "Category" },
   { key: "sub_category", label: "Sub Category" },
+  { key: "barcode", label: "Barcode" },
   { key: "uom", label: "UOM", align: "center" },
   { key: "qty", label: "Qty", align: "right" },
   { key: "expiry", label: "Expiry", align: "center" },
@@ -186,6 +189,42 @@ const ItemsList: React.FC = () => {
       return;
     }
     printItemsTable(toPrint, printHeader);
+  };
+
+  /**
+   * Hand the selected items to the label page as item numbers rather than row
+   * ids: a product has one row per branch, and the label describes the
+   * product, so branch rows of the same item must not queue twice.
+   */
+  const handlePrintLabels = () => {
+    const chosen = selectedIds.size > 0 ? items.filter((i) => selectedIds.has(i.id)) : [];
+
+    if (chosen.length === 0) {
+      enqueueSnackbar("Select the items you want labels for", { variant: "info" });
+      return;
+    }
+
+    const withoutBarcode = chosen.filter((i) => !i.barcode);
+    if (withoutBarcode.length === chosen.length) {
+      enqueueSnackbar(
+        "None of the selected items have a barcode yet. Open an item and generate one.",
+        { variant: "warning" }
+      );
+      return;
+    }
+
+    if (withoutBarcode.length > 0) {
+      enqueueSnackbar(
+        `${withoutBarcode.length} selected item(s) have no barcode and were skipped.`,
+        { variant: "warning" }
+      );
+    }
+
+    const itemNumbers = Array.from(
+      new Set(chosen.filter((i) => i.barcode).map((i) => i.item_number))
+    );
+
+    navigate(`/inventory/barcode-labels?items=${encodeURIComponent(itemNumbers.join(","))}`);
   };
 
   const handleExport = () => {
@@ -374,6 +413,22 @@ const ItemsList: React.FC = () => {
               <ViewColumnIcon />
             </IconButton>
           </Tooltip>
+          <Tooltip
+            title={
+              selectedIds.size > 0
+                ? `Print barcode labels for ${selectedIds.size} selected item(s)`
+                : "Select items to print barcode labels"
+            }
+          >
+            <IconButton
+              size="small"
+              onClick={handlePrintLabels}
+              disabled={items.length === 0}
+              color={selectedIds.size > 0 ? "primary" : "default"}
+            >
+              <QrCode2Icon />
+            </IconButton>
+          </Tooltip>
           <Tooltip title="Export CSV">
             <IconButton size="small" onClick={handleExport} disabled={items.length === 0}>
               <FileDownloadIcon />
@@ -486,6 +541,26 @@ const ItemsList: React.FC = () => {
                     }
                     if (col.key === "sub_category") {
                       return <TableCell key={col.key}>{item.sub_category ?? "—"}</TableCell>;
+                    }
+                    if (col.key === "barcode") {
+                      return (
+                        <TableCell
+                          key={col.key}
+                          sx={{ fontFamily: "monospace", whiteSpace: "nowrap" }}
+                        >
+                          {item.barcode ? (
+                            item.barcode
+                          ) : (
+                            <Typography
+                              variant="caption"
+                              color="text.secondary"
+                              sx={{ fontStyle: "italic" }}
+                            >
+                              not set
+                            </Typography>
+                          )}
+                        </TableCell>
+                      );
                     }
                     if (col.key === "uom") {
                       return (

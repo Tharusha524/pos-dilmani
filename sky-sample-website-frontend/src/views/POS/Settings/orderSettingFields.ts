@@ -192,6 +192,12 @@ export const ORDER_SETTINGS_SECTIONS: OrderSettingsSection[] = [
         title: "Allow order discount",
         description: "It allows giving a discount for the order.",
       },
+      {
+        key: "allow_sale_below_cost",
+        title: "Allow selling below cost",
+        description:
+          "Off by default: a sale is refused if a discount or price takes an item below its purchase price. Turn on to allow clearance sales at a loss.",
+      },
     ],
   },
 ];

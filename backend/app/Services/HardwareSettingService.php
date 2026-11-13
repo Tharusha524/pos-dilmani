@@ -139,7 +139,7 @@ class HardwareSettingService
         return HardwareSetting::firstOrCreate(
             ['user_id' => $user->id],
             [
-                'printing_paper_size' => 'a4',
+                'printing_paper_size' => '80mm',
                 'sales_receipt_printout_style' => 'style_4',
                 'allow_auto_print' => true,
                 'allow_multiple_printers' => false,

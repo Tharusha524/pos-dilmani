@@ -26,6 +26,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property float|int|string|null $default_discount
  * @property string|null $default_discount_type
  * @property float|int|string|null $max_discount
+ * @property string|null $max_discount_type
  * @property bool $has_multiple_options
  * @property string|null $item_details
  * @property bool $track_with_inventory
@@ -37,6 +38,9 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property string|null $item_code
  * @property string|null $supplier_item_code
  * @property string|null $sku
+ * @property string|null $barcode
+ * @property string|null $barcode_type
+ * @property bool $auto_generate_barcode
  * @property bool $is_favourite
  * @property bool $is_active
  * @property-read Company|null $company
@@ -64,6 +68,7 @@ class Item extends Model
         'default_discount',
         'default_discount_type',
         'max_discount',
+        'max_discount_type',
         'has_multiple_options',
         'item_details',
         'track_with_inventory',
@@ -75,6 +80,9 @@ class Item extends Model
         'item_code',
         'supplier_item_code',
         'sku',
+        'barcode',
+        'barcode_type',
+        'auto_generate_barcode',
         'is_favourite',
         'is_active',
     ];
@@ -92,6 +100,7 @@ class Item extends Model
         'reorder_qty' => 'decimal:2',
         'packets_per_bundle' => 'integer',
         'expiry_date' => 'date',
+        'auto_generate_barcode' => 'boolean',
         'is_favourite' => 'boolean',
         'is_active' => 'boolean',
     ];

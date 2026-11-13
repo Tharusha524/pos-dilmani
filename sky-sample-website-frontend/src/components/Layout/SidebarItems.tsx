@@ -1,4 +1,5 @@
 import DashboardIcon from "@mui/icons-material/Dashboard";
+import QrCodeScannerIcon from "@mui/icons-material/QrCodeScanner";
 import LayersIcon from "@mui/icons-material/Layers";
 import CalendarMonthIcon from "@mui/icons-material/CalendarMonth";
 import QueryStatsIcon from "@mui/icons-material/QueryStats";
@@ -65,6 +66,14 @@ export const sidebarItems: Array<SidebarItem> = [
     title: "Sales",
     href: "/sales",
     icon: <ShoppingCartIcon fontSize="small" />,
+    posKey: "pos.sales",
+  },
+  {
+    // Shares the Sales permission: it is the same action (ringing up a sale),
+    // reached by scanning instead of tapping the product grid.
+    title: "POS Checkout",
+    href: "/sales/checkout",
+    icon: <QrCodeScannerIcon fontSize="small" />,
     posKey: "pos.sales",
   },
   {

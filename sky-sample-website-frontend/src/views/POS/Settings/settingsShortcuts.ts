@@ -61,9 +61,15 @@ export const SETTINGS_SHORTCUTS: SettingsShortcut[] = [
   },
   {
     title: "Hardware",
-    description: "Printers, receipt layout, logos, and cash drawer",
+    description: "Printers, paper size, logos, and cash drawer",
     path: "hardware",
     icon: DevicesIcon,
+  },
+  {
+    title: "Receipt",
+    description: "Customise what the printed receipt shows, its wording, and its length",
+    path: "receipt",
+    icon: ReceiptLongIcon,
   },
   {
     title: "Employee",

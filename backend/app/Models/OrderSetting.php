@@ -39,6 +39,7 @@ class OrderSetting extends Model
         'allow_editing_of_hold_orders',
         'hold_order_pin',
         'allow_order_discount',
+        'allow_sale_below_cost',
     ];
 
     protected function casts(): array
@@ -71,6 +72,7 @@ class OrderSetting extends Model
             'allow_deletion_of_hold_orders' => 'boolean',
             'allow_editing_of_hold_orders' => 'boolean',
             'allow_order_discount' => 'boolean',
+            'allow_sale_below_cost' => 'boolean',
         ];
     }
 

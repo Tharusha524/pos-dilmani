@@ -375,8 +375,9 @@ class OrderTransactionService
                 $unitPrice = $expected;
             }
 
-            $lineDirection = in_array($row['line_direction'] ?? 'sale', ['sale', 'return'], true)
-                ? $row['line_direction']
+            $requestedDirection = $row['line_direction'] ?? 'sale';
+            $lineDirection = in_array($requestedDirection, ['sale', 'return'], true)
+                ? $requestedDirection
                 : 'sale';
 
             $line = [

@@ -1,6 +1,7 @@
 import type { Item } from "../../../api/itemsApi";
 import type { PricingMode } from "../../../api/salesApi";
 import type { SaleLineDraft } from "./SaleLineItemsSection";
+import { priceLine } from "./posLineDiscount";
 
 export type PosSalesPriceMode = "Retail" | "Wholesale";
 
@@ -54,10 +55,8 @@ export function applySalesTypeToLines(
     if (item) {
       unitPrice = unitPriceForCartLine(item, salesType, line);
     }
-    return {
-      ...line,
-      unit_price: unitPrice,
-      line_total: Math.round(line.qty * unitPrice * 100) / 100,
-    };
+    // Re-priced through priceLine so switching Retail/Wholesale keeps each
+    // line's discount — a percent discount scales to the new price.
+    return priceLine({ ...line, unit_price: unitPrice });
   });
 }

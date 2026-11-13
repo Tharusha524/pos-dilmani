@@ -7,6 +7,7 @@ import {
   CardContent,
   Checkbox,
   CircularProgress,
+  Divider,
   FormControl,
   FormControlLabel,
   Grid,
@@ -21,6 +22,8 @@ import {
   Typography,
 } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
+import AutorenewIcon from "@mui/icons-material/Autorenew";
+import QrCode2Icon from "@mui/icons-material/QrCode2";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import SaveIcon from "@mui/icons-material/Save";
 import FavoriteBorderIcon from "@mui/icons-material/FavoriteBorder";
@@ -32,9 +35,12 @@ import {
   createItem,
   getItem,
   getItemCategories,
+  getNextBarcode,
   getNextItemNumber,
   updateItem,
   uploadItemImage,
+  BARCODE_TYPES,
+  type BarcodeType,
   type DiscountType,
   type ItemPayload,
 } from "../../../api/itemsApi";
@@ -48,6 +54,8 @@ import { calcPricing } from "./itemFormCalculations";
 import ItemCategoryFormDialog, { type CategorySavedResult } from "./ItemCategoryFormDialog";
 import { DEFAULT_ITEM_PRODUCT_TYPE, ITEM_PRODUCT_TYPES } from "./itemProductTypes";
 import { DEFAULT_UOM_OPTIONS } from "./uomOptions";
+import BarcodeImage from "../../../components/barcode/BarcodeImage";
+import { barcodeValidationError, normalizeBarcode } from "../../../utils/barcode";
 
 const ITEMS_BASE = "/items";
 
@@ -112,6 +120,7 @@ function emptyForm(): ItemPayload {
     default_discount: 0,
     default_discount_type: "percent",
     max_discount: 0,
+    max_discount_type: "percent",
     has_multiple_options: false,
     item_details: "",
     track_with_inventory: true,
@@ -123,6 +132,9 @@ function emptyForm(): ItemPayload {
     item_code: "",
     supplier_item_code: "",
     sku: "",
+    barcode: "",
+    barcode_type: "CODE128",
+    auto_generate_barcode: true,
     is_favourite: false,
     is_active: true,
   };
@@ -137,7 +149,6 @@ const ItemFormPage: React.FC = () => {
   const { enqueueSnackbar } = useSnackbar();
 
   const [form, setForm] = useState<ItemPayload>(emptyForm);
-  const [maxDiscountType, setMaxDiscountType] = useState<DiscountType>("percent");
   const [categoryDialogOpen, setCategoryDialogOpen] = useState(false);
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState<string | null>(null);
@@ -219,6 +230,7 @@ const ItemFormPage: React.FC = () => {
       default_discount: existingItem.default_discount ?? 0,
       default_discount_type: existingItem.default_discount_type ?? "percent",
       max_discount: existingItem.max_discount ?? 0,
+      max_discount_type: existingItem.max_discount_type ?? "percent",
       has_multiple_options: existingItem.has_multiple_options ?? false,
       item_details: existingItem.item_details ?? "",
       track_with_inventory: existingItem.track_with_inventory ?? true,
@@ -230,6 +242,9 @@ const ItemFormPage: React.FC = () => {
       item_code: existingItem.item_code ?? "",
       supplier_item_code: existingItem.supplier_item_code ?? "",
       sku: existingItem.sku ?? "",
+      barcode: existingItem.barcode ?? "",
+      barcode_type: existingItem.barcode_type ?? "CODE128",
+      auto_generate_barcode: existingItem.auto_generate_barcode ?? true,
       is_favourite: existingItem.is_favourite ?? false,
       is_active: existingItem.is_active,
     });
@@ -257,6 +272,22 @@ const ItemFormPage: React.FC = () => {
       setForm((prev) => ({ ...prev, auto_generate_item_number: false }));
     }
   }, [itemSettings, isEdit]);
+
+  const [generatingBarcode, setGeneratingBarcode] = useState(false);
+
+  /**
+   * Validated as you type rather than only on save, so a mistyped EAN-13 is
+   * caught while the field is still in front of you — an invalid one prints
+   * as a blank label, which is only noticed after a sheet is wasted.
+   */
+  const barcodeError = useMemo(
+    () =>
+      barcodeValidationError(
+        String(form.barcode ?? ""),
+        (form.barcode_type ?? "CODE128") as BarcodeType
+      ),
+    [form.barcode, form.barcode_type]
+  );
 
   const setField = <K extends keyof ItemPayload>(key: K, value: ItemPayload[K]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -333,6 +364,10 @@ const ItemFormPage: React.FC = () => {
     const needsManualNumber = !allowAutoNumber || !form.auto_generate_item_number;
     if (needsManualNumber && !form.item_number?.trim()) {
       enqueueSnackbar("Item number is required", { variant: "warning" });
+      return;
+    }
+    if (barcodeError) {
+      enqueueSnackbar(barcodeError, { variant: "warning" });
       return;
     }
     saveMutation.mutate();
@@ -727,8 +762,12 @@ const ItemFormPage: React.FC = () => {
                       />
                       <RadioGroup
                         row
-                        value={maxDiscountType}
-                        onChange={(e) => setMaxDiscountType(e.target.value as DiscountType)}
+                        // Saved with the item now. It used to live only in this
+                        // page's memory, so "max Rs 500" came back as "500%".
+                        value={form.max_discount_type ?? "percent"}
+                        onChange={(e) =>
+                          setField("max_discount_type", e.target.value as DiscountType)
+                        }
                       >
                         <FormControlLabel value="percent" control={<Radio size="small" />} label="%" />
                         <FormControlLabel value="amount" control={<Radio size="small" />} label="Rs" />
@@ -945,6 +984,154 @@ const ItemFormPage: React.FC = () => {
                   />
                 </Grid>
               )}
+              <Grid item xs={12}>
+                <Divider sx={{ my: 1 }} />
+                <Box
+                  sx={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 1,
+                    mb: 1.5,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <QrCode2Icon fontSize="small" color="action" />
+                  <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+                    Barcode
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    Printed on the item's label and scanned at POS checkout.
+                  </Typography>
+                </Box>
+                <Grid container spacing={2} alignItems="flex-start">
+                  <Grid item xs={12} sm={4}>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      label="Barcode"
+                      value={form.barcode ?? ""}
+                      onChange={(e) => setField("barcode", e.target.value)}
+                      onBlur={(e) =>
+                        setField("barcode", normalizeBarcode(e.target.value))
+                      }
+                      error={Boolean(barcodeError)}
+                      helperText={
+                        barcodeError ??
+                        (form.auto_generate_barcode
+                          ? "Leave blank to let the system assign one on save."
+                          : "Enter the code printed on the item.")
+                      }
+                      sx={fieldSx}
+                    />
+                  </Grid>
+                  <Grid item xs={12} sm={3}>
+                    <TextField
+                      fullWidth
+                      select
+                      size="small"
+                      label="Barcode type"
+                      value={form.barcode_type ?? "CODE128"}
+                      onChange={(e) =>
+                        setField("barcode_type", e.target.value as BarcodeType)
+                      }
+                      sx={fieldSx}
+                    >
+                      {BARCODE_TYPES.map((opt) => (
+                        <MenuItem key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </MenuItem>
+                      ))}
+                    </TextField>
+                  </Grid>
+                  <Grid item xs={12} sm={5}>
+                    <Box sx={{ display: "flex", flexWrap: "wrap", gap: 1, alignItems: "center" }}>
+                      <Button
+                        type="button"
+                        size="small"
+                        variant="outlined"
+                        startIcon={<AutorenewIcon />}
+                        disabled={generatingBarcode}
+                        onClick={async () => {
+                          setGeneratingBarcode(true);
+                          try {
+                            const next = await getNextBarcode();
+                            setField("barcode", next.barcode);
+                            setField("barcode_type", next.barcode_type);
+                          } catch (err) {
+                            enqueueSnackbar(
+                              getFriendlyErrorMessage(err, "Could not generate a barcode"),
+                              { variant: "error" }
+                            );
+                          } finally {
+                            setGeneratingBarcode(false);
+                          }
+                        }}
+                      >
+                        {generatingBarcode ? "Generating…" : "Generate"}
+                      </Button>
+                      <FormControlLabel
+                        control={
+                          <Switch
+                            size="small"
+                            checked={form.auto_generate_barcode ?? true}
+                            onChange={(e) =>
+                              setField("auto_generate_barcode", e.target.checked)
+                            }
+                          />
+                        }
+                        label={
+                          <Typography variant="body2">Auto-generate</Typography>
+                        }
+                      />
+                    </Box>
+                  </Grid>
+                  <Grid item xs={12}>
+                    {/* Live preview: confirms the code actually encodes before
+                        a sheet of labels is printed from it. */}
+                    <Box
+                      sx={{
+                        p: 1.5,
+                        border: "1px dashed",
+                        borderColor: "divider",
+                        borderRadius: 1,
+                        display: "inline-flex",
+                        flexDirection: "column",
+                        alignItems: "center",
+                        gap: 0.5,
+                        minWidth: 200,
+                      }}
+                    >
+                      <BarcodeImage
+                        value={form.barcode}
+                        type={(form.barcode_type ?? "CODE128") as BarcodeType}
+                        height={40}
+                        emptyText={
+                          form.auto_generate_barcode
+                            ? "A barcode will be assigned when you save"
+                            : "No barcode set"
+                        }
+                      />
+                      {isEdit && form.barcode ? (
+                        <Button
+                          type="button"
+                          size="small"
+                          startIcon={<QrCode2Icon />}
+                          onClick={() =>
+                            navigate(
+                              `/inventory/barcode-labels?item=${encodeURIComponent(
+                                String(form.item_number ?? "")
+                              )}`
+                            )
+                          }
+                        >
+                          Print label
+                        </Button>
+                      ) : null}
+                    </Box>
+                  </Grid>
+                </Grid>
+                <Divider sx={{ mt: 2 }} />
+              </Grid>
               {showFavourite && (
                 <Grid item xs={12}>
                   <Button

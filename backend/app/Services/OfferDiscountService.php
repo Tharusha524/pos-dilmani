@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Item;
 use App\Models\Offer;
 use App\Models\User;
+use App\Support\LineDiscount;
 use App\Support\StorageUrl;
 use Carbon\Carbon;
 use Exception;
@@ -135,16 +136,29 @@ class OfferDiscountService
             $lineTotal = round($qty * $unitPrice, 2);
             $lineDiscount = 0.0;
 
+            // The line's own (item) discount, recomputed from its type and
+            // value rather than read from a client-sent amount, so the offer
+            // preview and the saved sale price a line identically.
+            $itemDiscount = LineDiscount::amount(
+                $qty,
+                $unitPrice,
+                LineDiscount::normalizeType($line['discount_type'] ?? null),
+                (float) ($line['discount_value'] ?? 0)
+            );
+            $netOfItemDiscount = round($lineTotal - $itemDiscount, 2);
+
+            // Order-level offers act on the whole bill, so they work on top of
+            // the item-discounted lines rather than erasing those discounts.
             if ($offer->discount_type === 'order') {
                 $adjustedLines[] = array_merge($line, [
-                    'line_total' => $lineTotal,
+                    'line_total' => $netOfItemDiscount,
                 ]);
                 continue;
             }
 
             if (!$itemId && $itemNumber === '') {
                 $adjustedLines[] = array_merge($line, [
-                    'line_total' => $lineTotal,
+                    'line_total' => $netOfItemDiscount,
                 ]);
                 continue;
             }
@@ -159,12 +173,11 @@ class OfferDiscountService
                 $offerBatchIds,
             );
 
+            // What the product offer alone would take off this line, measured
+            // against the undiscounted price as offers always have been.
             if ($inOfferSelection && !empty($rules['bargain_bin']['enabled'])) {
                 $binPrice = max(0, (float) ($rules['bargain_bin']['price'] ?? 0));
-                $newTotal = round($binPrice * $qty, 2);
-                $lineDiscount = max(0, round($lineTotal - $newTotal, 2));
-                $unitPrice = $qty > 0 ? round($newTotal / $qty, 2) : 0;
-                $lineTotal = $newTotal;
+                $lineDiscount = max(0, round($lineTotal - round($binPrice * $qty, 2), 2));
             } else {
                 $lineDiscount += $this->productLineDiscount(
                     $rules,
@@ -177,17 +190,36 @@ class OfferDiscountService
                     $selectionQtyTotal,
                     $selectionLines,
                 );
+            }
 
-                if ($lineDiscount > 0) {
-                    $newTotal = max(0, round($lineTotal - $lineDiscount, 2));
-                    $unitPrice = $qty > 0 ? round($newTotal / $qty, 2) : 0;
-                    $lineTotal = $newTotal;
-                }
+            /*
+             * The item's own discount and a product offer do not stack: the
+             * customer gets whichever saves them more. Stacking would let a
+             * 20% item discount plus a 20% offer take 40% off, which neither
+             * the shop owner nor the offer's author ever priced in.
+             *
+             * When the offer wins, the line is repriced at the offer's price
+             * and the item discount is cleared from it, so the stored line
+             * says truthfully which discount was applied.
+             */
+            if ($lineDiscount > $itemDiscount) {
+                $newTotal = max(0, round($lineTotal - $lineDiscount, 2));
+                $unitPrice = $qty > 0 ? round($newTotal / $qty, 2) : 0;
+                $lineTotal = $newTotal;
+                $lineOverrides = [
+                    'discount_type' => null,
+                    'discount_value' => 0.0,
+                    'discount_amount' => 0.0,
+                ];
+            } else {
+                $lineDiscount = 0.0;
+                $lineTotal = $netOfItemDiscount;
+                $lineOverrides = [];
             }
 
             $totalOfferDiscount += $lineDiscount;
 
-            $adjustedLines[] = array_merge($line, [
+            $adjustedLines[] = array_merge($line, $lineOverrides, [
                 'item_batch_id' => $lineBatchId,
                 'unit_price' => $unitPrice,
                 'line_total' => $lineTotal,

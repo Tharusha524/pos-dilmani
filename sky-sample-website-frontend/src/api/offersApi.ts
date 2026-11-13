@@ -217,6 +217,8 @@ export async function previewOfferDiscount(payload: {
     description?: string;
     qty: number;
     unit_price: number;
+    discount_type?: "percent" | "amount" | null;
+    discount_value?: number | null;
   }>;
 }): Promise<OfferPreviewResult> {
   const res = await axios.post("/api/offers/preview", payload);

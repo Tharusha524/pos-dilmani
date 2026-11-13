@@ -348,6 +348,11 @@ class SaleController extends Controller
             'items.*.qty' => 'nullable|numeric|min:0.01',
             'items.*.unit_price' => 'nullable|numeric|min:0',
             'items.*.line_total' => 'nullable|numeric|min:0',
+            // Only the type and value are accepted. The money off is always
+            // recomputed on the server and checked against the item's maximum,
+            // so a client cannot send an arbitrary discount amount.
+            'items.*.discount_type' => ['nullable', Rule::in(['percent', 'amount'])],
+            'items.*.discount_value' => 'nullable|numeric|min:0',
             'items.*.line_direction' => ['nullable', Rule::in(['sale', 'return'])],
             'items.*.imei_serial' => 'nullable|string|max:100',
             'items.*.batch_id' => 'nullable|string|max:100',

@@ -128,6 +128,17 @@ const ItemFormDialog: React.FC<ItemFormDialogProps> = ({
               <TextField fullWidth label="Location" size="small" {...register("location")} />
             </Grid>
             <Grid item xs={12} sm={6}>
+              {/* Left blank on purpose by most users: the backend assigns a
+                  CODE128 barcode on save, so quick-add stays quick. */}
+              <TextField
+                fullWidth
+                label="Barcode (optional)"
+                size="small"
+                helperText="Leave blank to auto-generate"
+                {...register("barcode")}
+              />
+            </Grid>
+            <Grid item xs={12} sm={6}>
               <FormControlLabel
                 control={
                   <Switch

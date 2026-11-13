@@ -13,6 +13,7 @@ class SaleReceiptService
     public function __construct(
         private CompanySettingService $companySettingService,
         private HardwareSettingService $hardwareSettingService,
+        private ReceiptSettingService $receiptSettingService,
     ) {
     }
 
@@ -49,6 +50,7 @@ class SaleReceiptService
 
         return [
             'hardware_settings' => $hardware,
+            'receipt_settings' => $this->receiptSettingService->getForUser($user),
             'company_header' => $companyHeader,
             'resolved_header' => $this->resolveHeader($hardware, $companyHeader),
         ];
@@ -71,6 +73,10 @@ class SaleReceiptService
                 'qty' => (float) ($line['qty'] ?? 0),
                 'unit_price' => (float) ($line['unit_price'] ?? 0),
                 'line_total' => (float) ($line['line_total'] ?? 0),
+                // So the receipt can show what was taken off the line. Without
+                // it a discounted line reads as qty × price that does not add
+                // up to the line total printed beside it.
+                'discount_amount' => (float) ($line['discount_amount'] ?? 0),
                 'line_direction' => $line['line_direction'] ?? 'sale',
             ];
             if ($hardware['show_item_uom_on_sales_receipt']) {
@@ -124,16 +130,41 @@ class SaleReceiptService
         }
 
         $labels = $this->labelsForLanguage($language, $hardware['allow_dual_language_print']);
+
+        $receiptSettings = $this->receiptSettingService->getForUser($user);
+
+        // The shop's own wording wins over the built-in captions, but only for
+        // captions the receipt actually prints — array_intersect_key drops any
+        // stale key a client might send.
+        $labels = array_merge($labels, array_intersect_key(
+            $receiptSettings['labels'] ?? [],
+            $labels
+        ));
+
+        // Applied after the merge, deliberately: an exchange or return receipt
+        // must be titled as one, so this is not a caption a shop may rename.
+        $isQuotation = ($sale['order_status'] ?? null) === OrderTransactionService::ORDER_STATUS_QUOTATION
+            || $transactionType === OrderTransactionService::TRANSACTION_TYPE_QUOTATION;
+
         if ($isExchange) {
             $labels['receipt_title'] = 'Exchange Receipt';
         } elseif ($isReturn) {
             $labels['receipt_title'] = 'Sales Return Receipt';
+        } elseif ($isQuotation) {
+            // A quotation is a price promise, not a sale: nothing was paid and
+            // no stock moved. Titled plainly so the customer cannot mistake it
+            // for a paid receipt.
+            $labels['receipt_title'] = 'Quotation';
         }
+
+        $receipt['is_quotation'] = $isQuotation;
+        $receipt['is_hold'] = ($sale['order_status'] ?? null) === OrderTransactionService::ORDER_STATUS_HOLD;
 
         return [
             'sale' => $receipt,
             'header' => $resolvedHeader,
             'hardware_settings' => $hardware,
+            'receipt_settings' => $receiptSettings,
             'print_options' => [
                 'printing_paper_size' => $hardware['printing_paper_size'],
                 'sales_receipt_printout_style' => $hardware['sales_receipt_printout_style'],

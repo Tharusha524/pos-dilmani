@@ -3,6 +3,15 @@ import type { ItemSettings } from "./Settings/itemSettingsApi";
 
 export type DiscountType = "percent" | "amount";
 
+/** CODE128 takes any length and needs no prefix registration, so it is the
+ * default; EAN13 is for shops already using retail-standard codes. */
+export type BarcodeType = "CODE128" | "EAN13";
+
+export const BARCODE_TYPES: { value: BarcodeType; label: string }[] = [
+  { value: "CODE128", label: "Code 128 (recommended)" },
+  { value: "EAN13", label: "EAN-13" },
+];
+
 export type ExpiryStatus = "none" | "ok" | "expiring_soon" | "expired";
 
 export type ItemSettingsSnapshot = Omit<ItemSettings, "id">;
@@ -27,6 +36,8 @@ export interface Item {
   default_discount?: number;
   default_discount_type?: DiscountType;
   max_discount?: number;
+  /** Unit for max_discount. Was previously never saved. */
+  max_discount_type?: DiscountType;
   has_multiple_options?: boolean;
   item_details?: string | null;
   track_with_inventory?: boolean;
@@ -57,6 +68,13 @@ export interface Item {
   item_code?: string | null;
   supplier_item_code?: string | null;
   sku?: string | null;
+  /** Scannable code printed on the item's label and read at POS checkout.
+   * Every branch's copy of the same item_number shares one barcode, since it
+   * identifies the physical product rather than the branch's stock row. */
+  barcode?: string | null;
+  barcode_type?: BarcodeType;
+  /** When true the backend assigns a barcode on save if the field is blank. */
+  auto_generate_barcode?: boolean;
   is_favourite?: boolean;
   is_active: boolean;
   status: string;
@@ -182,6 +200,37 @@ export async function getItem(id: number): Promise<Item> {
 export async function getNextItemNumber(): Promise<string> {
   const res = await axios.get("/api/items/next-number");
   return res.data.data.item_number;
+}
+
+/** A fresh unused barcode, so the user can see and edit it before saving. */
+export async function getNextBarcode(): Promise<{ barcode: string; barcode_type: BarcodeType }> {
+  const res = await axios.get("/api/items/next-barcode");
+  return res.data.data;
+}
+
+export interface BarcodeLookupResult {
+  items: Item[];
+  /** Which field the code matched, for showing why an unexpected item came up. */
+  matched_field: string | null;
+  /** True when one code maps to several products and the cashier must choose. */
+  ambiguous: boolean;
+}
+
+/**
+ * Resolve a scanned code to the item being sold.
+ *
+ * Throws when the code is unknown — unlike the search box this never falls
+ * back to a best guess, because quietly adding the wrong item to a cart is
+ * worse than telling the cashier the scan failed.
+ */
+export async function lookupItemByBarcode(
+  code: string,
+  location?: string
+): Promise<BarcodeLookupResult> {
+  const res = await axios.get("/api/items/barcode-lookup", {
+    params: { code, ...(location && location !== "all" ? { location } : {}) },
+  });
+  return res.data.data;
 }
 
 export async function createItem(payload: ItemPayload): Promise<Item> {

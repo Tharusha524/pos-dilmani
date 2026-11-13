@@ -35,6 +35,7 @@ class OrderSettingService
         'allow_deletion_of_hold_orders',
         'allow_editing_of_hold_orders',
         'allow_order_discount',
+        'allow_sale_below_cost',
     ];
 
     private const SEARCH_KEY_STYLES = ['item_code_qty', 'item_name_qty', 'barcode_qty'];
@@ -131,6 +132,7 @@ class OrderSettingService
                 'allow_editing_of_hold_orders' => true,
                 'hold_order_pin' => '12343',
                 'allow_order_discount' => true,
+                'allow_sale_below_cost' => false,
             ]
         );
     }

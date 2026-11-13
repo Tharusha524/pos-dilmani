@@ -18,13 +18,14 @@ function formatRs(amount: number): string {
 export function printItemsTable(items: Item[], header: CompanyPrintHeader): void {
   const rowsHtml =
     items.length === 0
-      ? `<tr><td colspan="9" style="text-align:center;color:#666;">No items</td></tr>`
+      ? `<tr><td colspan="10" style="text-align:center;color:#666;">No items</td></tr>`
       : items
           .map(
             (item) => `
         <tr>
           <td>${escapeHtml(item.item_number)}</td>
           <td>${escapeHtml(item.description)}</td>
+          <td style="font-family:monospace;">${escapeHtml(item.barcode ?? "—")}</td>
           <td>${escapeHtml(item.category ?? "—")}</td>
           <td>${escapeHtml(item.sub_category ?? "—")}</td>
           <td>${escapeHtml((item.uom ?? "pcs").toUpperCase())}</td>
@@ -49,6 +50,7 @@ export function printItemsTable(items: Item[], header: CompanyPrintHeader): void
         <tr>
           <th>Item Number</th>
           <th>Description</th>
+          <th>Barcode</th>
           <th>Category</th>
           <th>Sub Category</th>
           <th>UOM</th>
@@ -75,6 +77,7 @@ export function exportItemsCsv(items: Item[]): void {
   const headers = [
     "Item Number",
     "Description",
+    "Barcode",
     "Category",
     "Sub Category",
     "UOM",
@@ -87,6 +90,7 @@ export function exportItemsCsv(items: Item[]): void {
   const rows = items.map((item) => [
     item.item_number,
     item.description,
+    item.barcode ?? "",
     item.category ?? "",
     item.sub_category ?? "",
     (item.uom ?? "pcs").toUpperCase(),

@@ -47,6 +47,62 @@ class ItemController extends Controller
         }
     }
 
+    /**
+     * Resolve a scanned barcode to the item being sold.
+     *
+     * Kept separate from posSearch because the two have opposite failure
+     * modes: a search box should show its best guesses, while a scan must
+     * either be certain or say so. A 404 here means "unknown code", and a
+     * response with several items means the cashier has to pick.
+     */
+    public function barcodeLookup(Request $request)
+    {
+        try {
+            $validated = $request->validate([
+                'code' => 'required|string|max:64',
+                'location' => 'nullable|string|max:100',
+            ]);
+
+            $result = $this->itemService->lookupByBarcodeForUser(
+                $request->user(),
+                $validated['code'],
+                $validated['location'] ?? null,
+            );
+
+            return response()->json([
+                'success' => true,
+                'data' => $result,
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 404);
+        }
+    }
+
+    /**
+     * A fresh barcode the item form can drop into its field, so the user sees
+     * and can edit the code before saving rather than having it appear only
+     * after the item is created.
+     */
+    public function nextBarcode(Request $request)
+    {
+        try {
+            $result = $this->itemService->generateBarcodeForUser($request->user());
+
+            return response()->json([
+                'success' => true,
+                'data' => $result,
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 400);
+        }
+    }
+
     public function posSearch(Request $request)
     {
         try {
@@ -576,6 +632,7 @@ class ItemController extends Controller
             'default_discount' => 'nullable|numeric|min:0',
             'default_discount_type' => 'nullable|in:percent,amount',
             'max_discount' => 'nullable|numeric|min:0',
+            'max_discount_type' => 'nullable|in:percent,amount',
             'has_multiple_options' => 'nullable|boolean',
             'item_details' => 'nullable|string',
             'track_with_inventory' => 'nullable|boolean',
@@ -587,6 +644,9 @@ class ItemController extends Controller
             'item_code' => 'nullable|string|max:100',
             'supplier_item_code' => 'nullable|string|max:100',
             'sku' => 'nullable|string|max:100',
+            'barcode' => 'nullable|string|max:64',
+            'barcode_type' => 'nullable|in:CODE128,EAN13',
+            'auto_generate_barcode' => 'nullable|boolean',
             'is_favourite' => 'nullable|boolean',
             'is_active' => 'nullable|boolean',
         ];

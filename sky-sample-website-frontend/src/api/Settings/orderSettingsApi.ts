@@ -44,6 +44,8 @@ export interface OrderSettings {
   allow_editing_of_hold_orders: boolean;
   hold_order_pin: string;
   allow_order_discount: boolean;
+  /** When false, a sale cannot price an item below its purchase price. */
+  allow_sale_below_cost: boolean;
 }
 
 export type OrderSettingsPayload = Partial<Omit<OrderSettings, "id">>;

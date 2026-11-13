@@ -12,7 +12,9 @@ import type { PosSubCategoryTab } from "./PosSubCategoryTabs";
 import type { PosSalesPriceMode } from "./posSalePricing";
 import type { ChequePaymentDetails } from "./PosChequeBankDialog";
 
-export type PosSaleView = "products" | "checkout";
+/** "scan" is the barcode-first cashier lane; "products" is the tap-to-browse
+ *  catalog grid. Both feed the same cart and the same "checkout" step. */
+export type PosSaleView = "products" | "checkout" | "scan";
 
 export interface PosSaleSession {
   view: PosSaleView;
@@ -38,8 +40,6 @@ export interface PosSaleSession {
   offerEngine: SaleOfferEngineState;
   selectedOffer: SalesPosApplicableOffer | null;
   activeHoldSaleId: number | null;
-  holdPin: string;
-  setHoldPin: Dispatch<SetStateAction<string>>;
   itemBranch: string;
   catalogScopeLabel: string;
   categories: ItemCategory[];
@@ -82,8 +82,44 @@ export interface PosSaleSession {
   removeFromCart: (displayItem: Item) => void;
   cartQtyForItem: (itemId: number) => number;
   handleCatalogSearchSubmit: () => void;
+  /** Resolve a scanned code. Shows the item for confirmation rather than
+   *  adding it — nothing reaches the cart unseen. */
+  handleScannedCode: (raw: string) => Promise<void>;
+  /** Live suggestions for what is typed or scanned into the search box. */
+  scanResults: Item[];
+  /** Step one: hold the picked item and open the quantity step. */
+  selectScanItem: (item: Item) => void;
+  /** The item awaiting a quantity, or null when the scan box is idle. */
+  pendingScanItem: Item | null;
+  pendingScanQty: string;
+  setPendingScanQty: Dispatch<SetStateAction<string>>;
+  /** Selling price in the entry row; editable when price editing is allowed. */
+  pendingScanPrice: string;
+  setPendingScanPrice: Dispatch<SetStateAction<string>>;
+  pendingScanDiscountType: "percent" | "amount";
+  setPendingScanDiscountType: Dispatch<SetStateAction<"percent" | "amount">>;
+  pendingScanDiscountValue: string;
+  setPendingScanDiscountValue: Dispatch<SetStateAction<string>>;
+  /** True when Order Settings allow selling below cost. */
+  allowSaleBelowCost: boolean;
+  /** Order Settings: whether a whole-bill discount may be given. */
+  allowOrderDiscount: boolean;
+  /** Step two: bill the held item at the confirmed quantity. */
+  commitPendingScanItem: () => void;
+  cancelPendingScan: () => void;
+  scanBusy: boolean;
+  /** Bumped after every cart action so the scan field reclaims focus. */
+  scanRefocusToken: number;
+  scanInput: string;
+  setScanInput: Dispatch<SetStateAction<string>>;
+  cameraScanOpen: boolean;
+  setCameraScanOpen: Dispatch<SetStateAction<boolean>>;
   setLineQty: (key: string, rawQty: number) => void;
   setLineUnitPrice: (key: string, rawPrice: number) => void;
+  /** Change a line's discount; clamped to the item's maximum. */
+  setLineDiscount: (key: string, type: "percent" | "amount", rawValue: number) => void;
+  /** Whether item discounts are switched on in item settings. */
+  allowItemDiscount: boolean;
   updateLineQty: (key: string, delta: number) => void;
   handlePaymentSelect: (method: PosPaymentMethod) => void;
   handleComplete: () => void;
@@ -93,4 +129,25 @@ export interface PosSaleSession {
   savePosSelectedCustomer: (customer: Customer | null) => void;
   customerDisplayName: (customer: Customer) => string;
   goToCheckout: () => void;
+  /** Whether completing a sale also sends the receipt to the printer, so the
+   *  Pay button can say what it will actually do. */
+  autoPrintEnabled: boolean;
+  /** Save the cart as a quotation: no payment, no stock movement. */
+  handleQuote: () => void;
+  setReprintOpen: Dispatch<SetStateAction<boolean>>;
+  setQuickAddCustomerOpen: Dispatch<SetStateAction<boolean>>;
+  customerOpenSignal: number;
+  /** Opens the customer picker — the F5 shortcut. */
+  openCustomerPicker: () => void;
+  /** Pay with two or more methods instead of one. */
+  splitMode: boolean;
+  setSplitMode: Dispatch<SetStateAction<boolean>>;
+  paymentSplits: import("./posPaymentSplits").PaymentSplitLine[];
+  setPaymentSplits: Dispatch<SetStateAction<import("./posPaymentSplits").PaymentSplitLine[]>>;
+  /** Keys of cart lines priced below cost (empty when selling below cost is allowed). */
+  belowCostKeys: Set<string>;
+  /** Why Pay would be refused for selling below cost, or null. */
+  belowCostMessage: string | null;
+  /** An item's purchase price, for the "below cost" note under a line. */
+  unitCostFor: (itemId: number | null | undefined) => number;
 }

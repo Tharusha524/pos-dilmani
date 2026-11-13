@@ -37,7 +37,10 @@ export function cartLinesSignature(lines: CartOfferLine[]): string {
   return lines
     .map(
       (line) =>
-        `${line.item_id ?? ""}|${line.item_number ?? ""}|${line.item_batch_id ?? ""}|${line.qty}|${line.unit_price}`
+        // The line discount is part of the key: the offer is priced against
+        // it, so changing a discount has to re-run the preview or the
+        // cashier is shown a total that no longer matches the cart.
+        `${line.item_id ?? ""}|${line.item_number ?? ""}|${line.item_batch_id ?? ""}|${line.qty}|${line.unit_price}|${line.discount_type ?? ""}|${line.discount_value ?? 0}`
     )
     .join(";");
 }
@@ -113,6 +116,8 @@ export function useSaleOfferEngine({
         description: line.description ?? "",
         qty: line.qty,
         unit_price: line.unit_price,
+        discount_type: line.discount_type ?? null,
+        discount_value: line.discount_value ?? 0,
       })),
     [lines]
   );

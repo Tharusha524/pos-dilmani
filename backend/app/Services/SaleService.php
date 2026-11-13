@@ -392,6 +392,11 @@ class SaleService
                     'description' => $line->description,
                     'qty' => (float) $line->qty,
                     'unit_price' => (float) $line->unit_price,
+                    // Carried through so re-pricing an existing sale (when only
+                    // its charges change) keeps each line's discount. Leaving
+                    // them out would quietly raise the bill back to full price.
+                    'discount_type' => $line->discount_type,
+                    'discount_value' => (float) ($line->discount_value ?? 0),
                     'line_direction' => $line->line_direction ?? 'sale',
                 ])->all());
                 $applied = $this->orderTransactionService->applySaleRules($user, $payload, $existingLines, false, $sale);
@@ -593,6 +598,9 @@ class SaleService
                 'qty' => $line['qty'],
                 'unit_price' => $line['unit_price'],
                 'line_total' => $line['line_total'],
+                'discount_type' => $line['discount_type'] ?? null,
+                'discount_value' => $line['discount_value'] ?? 0,
+                'discount_amount' => $line['discount_amount'] ?? 0,
                 'line_direction' => $line['line_direction'] ?? 'sale',
                 'imei_serial' => $line['imei_serial'] ?? null,
                 'batch_id' => $line['batch_id'] ?? null,
@@ -1010,6 +1018,9 @@ class SaleService
                 'qty' => (float) $line->qty,
                 'unit_price' => (float) $line->unit_price,
                 'line_total' => (float) $line->line_total,
+                'discount_type' => $line->discount_type,
+                'discount_value' => (float) ($line->discount_value ?? 0),
+                'discount_amount' => (float) ($line->discount_amount ?? 0),
                 'line_direction' => $line->line_direction ?? 'sale',
                 'imei_serial' => $line->imei_serial,
                 'batch_id' => $line->batch_id,

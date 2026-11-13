@@ -39,6 +39,8 @@ import {
 } from "./saleOfferLineDisplay";
 import { POS_PAYMENT_OPTIONS } from "./posSaleConstants";
 import PosSalesTypeToggle from "./PosSalesTypeToggle";
+import PosLineDiscountInput from "./PosLineDiscountInput";
+import { maxDiscountHint } from "./posLineDiscountHint";
 import CustomerReceivePaymentDialog from "../customers/CustomerReceivePaymentDialog";
 import { invalidatePosQueries } from "../../../utils/invalidatePosQueries";
 import { formatDashboardRs } from "../shared/dashboardShared";
@@ -48,6 +50,12 @@ const PosSaleCheckoutPage: React.FC = () => {
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
   const [receivePaymentOpen, setReceivePaymentOpen] = useState(false);
+
+  // Lets each cart row show its item's discount ceiling as a hint.
+  const itemById = useMemo(
+    () => new Map(s.catalogItems.map((item) => [item.id, item])),
+    [s.catalogItems]
+  );
 
   const selectedCustomer = useMemo(
     () => s.customers.find((c) => c.id === s.form.customer_id) ?? null,
@@ -165,6 +173,14 @@ const PosSaleCheckoutPage: React.FC = () => {
                     <TableCell align="center" sx={{ fontWeight: 700, bgcolor: "var(--surface-bg-alt)", width: 140 }}>
                       Qty
                     </TableCell>
+                    {s.allowItemDiscount ? (
+                      <TableCell
+                        align="right"
+                        sx={{ fontWeight: 700, bgcolor: "var(--surface-bg-alt)", width: 170 }}
+                      >
+                        Discount
+                      </TableCell>
+                    ) : null}
                     <TableCell align="right" sx={{ fontWeight: 700, bgcolor: "var(--surface-bg-alt)" }}>
                       Total
                     </TableCell>
@@ -176,7 +192,11 @@ const PosSaleCheckoutPage: React.FC = () => {
                 <TableBody>
                   {s.lines.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={6} align="center" sx={{ py: 4, color: "text.secondary" }}>
+                      <TableCell
+                        colSpan={s.allowItemDiscount ? 7 : 6}
+                        align="center"
+                        sx={{ py: 4, color: "text.secondary" }}
+                      >
                         No items yet. Go back and add products.
                       </TableCell>
                     </TableRow>
@@ -440,6 +460,25 @@ const PosSaleCheckoutPage: React.FC = () => {
                               </IconButton>
                             </Box>
                           </TableCell>
+                          {s.allowItemDiscount ? (
+                            <TableCell align="right">
+                              <PosLineDiscountInput
+                                type={line.discount_type}
+                                value={line.discount_value}
+                                onChange={(type, value) => s.setLineDiscount(line.key, type, value)}
+                                hint={maxDiscountHint(itemById.get(line.item_id ?? -1))}
+                              />
+                              {Number(line.discount_amount ?? 0) > 0 ? (
+                                <Typography
+                                  variant="caption"
+                                  color="success.main"
+                                  sx={{ display: "block", fontWeight: 700, mt: 0.25 }}
+                                >
+                                  −{formatSaleRs(Number(line.discount_amount))}
+                                </Typography>
+                              ) : null}
+                            </TableCell>
+                          ) : null}
                           <TableCell align="right">
                             <Typography
                               variant="body2"
@@ -729,17 +768,6 @@ const PosSaleCheckoutPage: React.FC = () => {
               }}
             />
 
-            {s.activeHoldSaleId ? (
-              <TextField
-                fullWidth
-                size="small"
-                type="password"
-                label="Hold PIN"
-                value={s.holdPin}
-                onChange={(e) => s.setHoldPin(e.target.value)}
-                helperText="Required to complete, update, or save this hold order"
-              />
-            ) : null}
           </Paper>
         </Grid>
       </Grid>

@@ -11,6 +11,12 @@ import type {
   SaleReceiptLine,
 } from "../../../api/salesApi";
 import { buildReceiptSoftwareFooterHtml } from "../../../utils/receiptSoftwareFooter";
+import { buildBarcodeSvgMarkup } from "../../../utils/barcodeSvg";
+import type {
+  ReceiptCustomField,
+  ReceiptCustomFieldPosition,
+  ReceiptSettings,
+} from "../../../api/Settings/receiptSettingsApi";
 import { formatSaleRs } from "./saleFormUtils";
 
 export type { SaleReceiptApiPayload, SaleReceiptLabels, SaleReceiptLine };
@@ -19,6 +25,9 @@ export interface SaleReceiptData {
   sales_id: string;
   sale_date: string;
   customer_name?: string | null;
+  customer_code?: string | null;
+  customer_contact_no?: string | null;
+  customer_route?: string | null;
   location: string;
   payment_method: string;
   sub_total: number;
@@ -33,6 +42,19 @@ export interface SaleReceiptData {
   show_barcode?: boolean;
   barcode_value?: string | null;
   discount_label?: string | null;
+  /** Present only for a split payment: each method and what it covered. */
+  payment_splits?: {
+    payment_method: string;
+    amount: number;
+    bank_name?: string | null;
+    cheque_number?: string | null;
+  }[];
+  is_quotation?: boolean;
+  is_hold?: boolean;
+  is_return?: boolean;
+  is_exchange?: boolean;
+  /** Customer's total outstanding balance across all past bills. */
+  outstanding_balance?: number | null;
 }
 
 export interface SaleReceiptPrintOptions {
@@ -48,6 +70,7 @@ const DEFAULT_LABELS: SaleReceiptLabels = {
   sales_id: "Invoice No",
   date: "Date",
   location: "Branch",
+  cashier: "Cashier",
   customer: "Bill To",
   item_no: "SKU",
   description: "Description",
@@ -63,11 +86,39 @@ const DEFAULT_LABELS: SaleReceiptLabels = {
   payment: "Payment",
   received: "Paid",
   change: "Change",
+  you_saved: "You saved",
   thank_you: "Thank you for your business",
 };
 
 const INK = "#111111";
 const MUTED = "#444444";
+
+/**
+ * The admin-added lines sitting at one point in the receipt.
+ *
+ * Returns "" when there are none, so each insertion point costs nothing when
+ * unused. A field with only a value prints the value alone — the label is a
+ * caption, not a requirement.
+ */
+function buildCustomFieldsHtml(
+  fields: ReceiptCustomField[] | undefined,
+  position: ReceiptCustomFieldPosition
+): string {
+  if (!fields || fields.length === 0) return "";
+
+  const html = fields
+    .filter((field) => field.position === position && (field.label || field.value))
+    .map((field) => {
+      const text = field.label && field.value
+        ? `${field.label}: ${field.value}`
+        : field.label || field.value;
+
+      return `<div class="rcpt-custom" style="text-align:${field.align};font-size:${field.font_size}px;font-weight:${field.bold ? 700 : 400};">${escape(text)}</div>`;
+    })
+    .join("");
+
+  return html;
+}
 
 /** Letterhead top gap is for pre-printed A4/A5/Letter stock — not 80mm thermal rolls. */
 function resolveReceiptTopMargin(
@@ -97,6 +148,7 @@ export function buildSaleReceiptHtmlFromApi(payload: SaleReceiptApiPayload): str
   return buildSaleReceiptHtml(header, payload.sale, {
     labels: payload.labels,
     hardware: payload.hardware_settings,
+    receipt: payload.receipt_settings,
     options: {
       printing_paper_size: payload.print_options.printing_paper_size as PrintingPaperSize,
       sales_receipt_printout_style: payload.print_options
@@ -121,12 +173,14 @@ function buildSaleReceiptHtml(
     labels?: Partial<SaleReceiptLabels>;
     options?: SaleReceiptPrintOptions;
     hardware?: HardwareSettings;
+    receipt?: ReceiptSettings;
   }
 ): string {
   const hw = extras?.hardware;
+  const rs = extras?.receipt;
   const labels = { ...DEFAULT_LABELS, ...extras?.labels };
   const options: SaleReceiptPrintOptions = {
-    printing_paper_size: hw?.printing_paper_size ?? extras?.options?.printing_paper_size ?? "a4",
+    printing_paper_size: hw?.printing_paper_size ?? extras?.options?.printing_paper_size ?? "80mm",
     sales_receipt_printout_style:
       hw?.sales_receipt_printout_style ?? extras?.options?.sales_receipt_printout_style ?? "style_4",
     letterhead_top_margin_cm:
@@ -151,11 +205,16 @@ function buildSaleReceiptHtml(
     } else if (!saleData.discount_label) {
       saleData = { ...saleData, discount_label: hw.customize_label_for_discount || "Discount" };
     }
-    if (!hw.show_barcode_on_sales_receipt) {
-      saleData = { ...saleData, show_barcode: false };
-    } else {
-      saleData = { ...saleData, show_barcode: true, barcode_value: saleData.sales_id };
-    }
+    // Two switches reach the same block: the hardware page's long-standing
+    // toggle and the receipt editor's. Either turning it off wins, so a shop
+    // that hid the barcode in one place does not see it reappear because of
+    // the other.
+    const barcodeAllowed =
+      hw.show_barcode_on_sales_receipt && (rs ? rs.show_barcode : true);
+
+    saleData = barcodeAllowed
+      ? { ...saleData, show_barcode: true, barcode_value: saleData.sales_id }
+      : { ...saleData, show_barcode: false };
   }
 
   const resolvedHeader: CompanyPrintHeader = {
@@ -166,7 +225,7 @@ function buildSaleReceiptHtml(
   const style = options.sales_receipt_printout_style ?? "style_4";
   const isThermal = (options.printing_paper_size ?? "a4") === "80mm";
   if (isThermal) {
-    return buildThermalReceiptDocument(resolvedHeader, saleData, labels, options);
+    return buildThermalReceiptDocument(resolvedHeader, saleData, labels, options, rs);
   }
   return buildA4ReceiptDocument(resolvedHeader, saleData, labels, style, options);
 }
@@ -178,6 +237,7 @@ export function printSaleReceipt(
     labels?: Partial<SaleReceiptLabels>;
     options?: SaleReceiptPrintOptions;
     hardware?: HardwareSettings;
+    receipt?: ReceiptSettings;
   }
 ): void {
   const html = buildSaleReceiptHtml(header, sale, extras);
@@ -191,76 +251,162 @@ function buildThermalReceiptDocument(
   header: CompanyPrintHeader,
   sale: SaleReceiptData,
   labels: SaleReceiptLabels,
-  options: SaleReceiptPrintOptions
+  options: SaleReceiptPrintOptions,
+  rs?: ReceiptSettings
 ): string {
+  const show = (key: keyof ReceiptSettings): boolean =>
+    rs ? Boolean(rs[key]) : true;
+
+  const isHold      = Boolean(sale.is_hold);
+  const isReturn    = Boolean(sale.is_return);
+  const isQuotation = Boolean(sale.is_quotation);
+
   const change =
-    sale.amount_received != null ? Math.max(0, sale.amount_received - sale.net_amount) : null;
+    !isHold && sale.amount_received != null
+      ? Math.max(0, sale.amount_received - sale.net_amount)
+      : null;
   const discountLabel = sale.discount_label ?? labels.discount;
-  const showDiscount = sale.discount > 0 || sale.discount_label != null;
-  const customerName = sale.customer_name ?? "Walk-in";
-
-  const contactLine = [header.phone, header.email].filter(Boolean).join(" · ");
-  const taxLine = [
-    header.tax_id ? `Tax: ${header.tax_id}` : "",
-    header.registration_number ? `Reg: ${header.registration_number}` : "",
-  ]
-    .filter(Boolean)
-    .join(" · ");
-
-  const logoHtml = header.logo_url
-    ? `<img class="rcpt-logo" src="${escape(header.logo_url)}" alt="" />`
-    : "";
-
-  const itemBlocks = sale.lines
-    .map((line) => {
-      const uomSuffix = line.uom ? ` (${escape(line.uom)})` : "";
-      return `
-      <div class="rcpt-item">
-        <div class="rcpt-item-name">${escape(line.description)}${uomSuffix}</div>
-        <div class="rcpt-item-detail">
-          <span>${line.qty} × ${formatSaleRs(line.unit_price)}</span>
-          <span class="rcpt-item-amt">${formatSaleRs(line.line_total)}</span>
-        </div>
-      </div>`;
-    })
-    .join("");
-
-  const totalLines = [
-    `<div class="rcpt-row"><span>${escape(labels.sub_total)}</span><span>${formatSaleRs(sale.sub_total)}</span></div>`,
-    showDiscount
-      ? `<div class="rcpt-row"><span>${escape(discountLabel)}</span><span>- ${formatSaleRs(sale.discount)}</span></div>`
-      : "",
-    (sale.service_charge ?? 0) > 0
-      ? `<div class="rcpt-row"><span>${escape(labels.service_charge)}</span><span>${formatSaleRs(sale.service_charge!)}</span></div>`
-      : "",
-    (sale.card_payment_charge ?? 0) > 0
-      ? `<div class="rcpt-row"><span>${escape(labels.card_charge)}</span><span>${formatSaleRs(sale.card_payment_charge!)}</span></div>`
-      : "",
-    `<div class="rcpt-row rcpt-row-grand"><span>${escape(labels.net_amount)}</span><span>${formatSaleRs(sale.net_amount)}</span></div>`,
-    `<div class="rcpt-row"><span>${escape(labels.payment)}</span><span>${escape(sale.payment_method)}</span></div>`,
-    sale.amount_received != null
-      ? `<div class="rcpt-row"><span>${escape(labels.received)}</span><span>${formatSaleRs(sale.amount_received)}</span></div>`
-      : "",
-    change != null && change > 0
-      ? `<div class="rcpt-row"><span>${escape(labels.change)}</span><span>${formatSaleRs(change)}</span></div>`
-      : "",
-    sale.cheque_number
-      ? `<div class="rcpt-row rcpt-row-note"><span>Cheque</span><span>${escape(sale.cheque_number)}</span></div>`
-      : "",
-  ]
-    .filter(Boolean)
-    .join("");
-
-  const barcodeHtml =
-    sale.show_barcode && sale.barcode_value
-      ? `<div class="rcpt-barcode">
-          <div class="rcpt-barcode-bars"></div>
-          <div class="rcpt-barcode-no">${escape(sale.barcode_value)}</div>
-        </div>`
-      : "";
+  const showDiscount =
+    show("show_discount_column") && (sale.discount > 0 || sale.discount_label != null);
 
   const margin = options.letterhead_top_margin_cm ?? "none";
   const marginTop = resolveReceiptTopMargin(options.printing_paper_size, margin);
+
+  // ── Header ──────────────────────────────────────────────────────────────────
+  const logoHtml =
+    show("show_logo") && header.logo_url
+      ? `<img class="rcpt-logo" src="${escape(header.logo_url)}" alt="" />`
+      : "";
+
+  const phoneLine = show("show_phone") && header.phone
+    ? `<div class="rcpt-sub">Tel: ${escape(header.phone)}</div>` : "";
+  const emailLine = show("show_email") && header.email
+    ? `<div class="rcpt-sub">${escape(header.email)}</div>` : "";
+  const taxLine = show("show_tax_id") && (header.tax_id || header.registration_number)
+    ? `<div class="rcpt-sub rcpt-tax">${[
+        header.tax_id ? `Tax: ${escape(header.tax_id)}` : "",
+        header.registration_number ? `Reg: ${escape(header.registration_number)}` : "",
+      ].filter(Boolean).join(" · ")}</div>` : "";
+
+  // ── Dynamic title + Bill No label ───────────────────────────────────────────
+  const titleText = isReturn    ? "SALES RETURN"
+                  : isQuotation ? "PRICE QUOTATION"
+                  : isHold      ? "HOLD ORDER"
+                  : "SALES RECEIPT";
+
+  const billNoLabel = isReturn    ? "Return No"
+                    : isQuotation ? "Quotation No"
+                    : isHold      ? "Hold No"
+                    : "Bill No";
+
+  const billNoHtml = show("show_invoice_id")
+    ? `<div class="rcpt-inv-no">${billNoLabel}: ${escape(sale.sales_id)}</div>` : "";
+
+  const currencyLine = `<div class="rcpt-currency">All amounts in LKR</div>`;
+
+  // ── Info rows — payment in meta block (split = one row per method) ──────────
+  const splits = (sale.payment_splits ?? []).filter((s) => Number(s.amount) > 0);
+
+  const paymentInfoRows = !isQuotation
+    ? splits.length > 0
+      ? splits.flatMap((s) => [
+          `<div class="rcpt-row"><span>${escape(s.payment_method)}${s.cheque_number ? ` #${escape(s.cheque_number)}` : ""}</span><span>LKR ${formatSaleRs(Number(s.amount))}</span></div>`,
+          s.bank_name ? `<div class="rcpt-row rcpt-row-note"><span>&nbsp;&nbsp;Bank</span><span>${escape(s.bank_name)}</span></div>` : "",
+        ]).filter(Boolean).join("")
+      : [
+          show("show_payment_method")
+            ? `<div class="rcpt-row"><span>${escape(labels.payment)}</span><span>${escape(sale.payment_method)}</span></div>` : "",
+          sale.bank_name
+            ? `<div class="rcpt-row rcpt-row-note"><span>Bank</span><span>${escape(sale.bank_name)}</span></div>` : "",
+          sale.cheque_number
+            ? `<div class="rcpt-row rcpt-row-note"><span>Cheque #</span><span>${escape(sale.cheque_number)}</span></div>` : "",
+        ].filter(Boolean).join("")
+    : "";
+
+  const infoRows = [
+    show("show_date_time")
+      ? `<div class="rcpt-row"><span>${escape(labels.date)}</span><span>${escape(sale.sale_date)}</span></div>` : "",
+    show("show_branch_name")
+      ? `<div class="rcpt-row"><span>${escape(labels.location)}</span><span>${escape(sale.location)}</span></div>` : "",
+    paymentInfoRows,
+  ].filter(Boolean).join("");
+
+  // ── Customer section ─────────────────────────────────────────────────────────
+  const customerRows = [
+    sale.customer_name    ? `<div class="rcpt-row"><span>Customer</span><span>${escape(sale.customer_name)}</span></div>` : "",
+    sale.customer_code    ? `<div class="rcpt-row rcpt-row-note"><span>Customer ID</span><span>${escape(sale.customer_code)}</span></div>` : "",
+    sale.customer_contact_no ? `<div class="rcpt-row rcpt-row-note"><span>Phone</span><span>${escape(sale.customer_contact_no)}</span></div>` : "",
+    sale.customer_route   ? `<div class="rcpt-row rcpt-row-note"><span>Route</span><span>${escape(sale.customer_route)}</span></div>` : "",
+  ].filter(Boolean).join("");
+
+  const customerSection = show("show_customer_name") && customerRows
+    ? `<div class="rcpt-rule"></div>
+       <div class="rcpt-section-title">Customer Information</div>
+       ${customerRows}` : "";
+
+  // ── Item rows ────────────────────────────────────────────────────────────────
+  const itemRows = sale.lines.map((line) => {
+    const lineDiscount = Number(line.discount_amount ?? 0);
+    const showLineDiscount = lineDiscount > 0 && show("show_discount_column");
+    const grossAmt = showLineDiscount
+      ? Math.round((line.line_total + lineDiscount) * 100) / 100
+      : line.line_total;
+    const uom = show("show_item_uom") && line.uom ? ` ${escape(line.uom)}` : " Pcs";
+    const qtyDetail = show("show_unit_price")
+      ? `${line.qty}${uom} x LKR ${formatSaleRs(line.unit_price)}`
+      : `${escape(labels.qty)}: ${line.qty}`;
+    const discountRow = showLineDiscount
+      ? `<tr><td class="rcpt-disc-cell" colspan="3">– Discount: ${formatSaleRs(lineDiscount)}</td></tr>` : "";
+    return `
+      <tr class="rcpt-item-name-row">
+        <td class="rcpt-item-name-cell" colspan="2">${escape(line.description)}</td>
+        <td class="rcpt-item-amt-cell">LKR ${formatSaleRs(grossAmt)}</td>
+      </tr>
+      <tr class="rcpt-item-detail-row">
+        <td colspan="3" class="rcpt-item-detail-cell">${qtyDetail}</td>
+      </tr>
+      ${discountRow}`;
+  }).join("");
+
+  // ── Totals ───────────────────────────────────────────────────────────────────
+  const subtotalRow = `<div class="rcpt-row rcpt-row-sub"><span>${escape(labels.sub_total)}</span><span>LKR ${formatSaleRs(sale.sub_total)}</span></div>`;
+  const discountRow = showDiscount
+    ? `<div class="rcpt-row"><span>${escape(discountLabel)}</span><span>– LKR ${formatSaleRs(sale.discount)}</span></div>` : "";
+  const serviceRow = (sale.service_charge ?? 0) > 0
+    ? `<div class="rcpt-row"><span>${escape(labels.service_charge)}</span><span>LKR ${formatSaleRs(sale.service_charge!)}</span></div>` : "";
+  const cardRow = (sale.card_payment_charge ?? 0) > 0
+    ? `<div class="rcpt-row"><span>${escape(labels.card_charge)}</span><span>LKR ${formatSaleRs(sale.card_payment_charge!)}</span></div>` : "";
+
+  // Dynamic TOTAL label
+  const totalLabel = isHold   ? "AMOUNT DUE"
+                   : sale.discount > 0 ? "BALANCE"
+                   : "TOTAL";
+
+  const totalRow = `
+    <div class="rcpt-rule"></div>
+    <div class="rcpt-row rcpt-row-grand">
+      <span>${totalLabel}</span>
+      <span>LKR ${formatSaleRs(sale.net_amount)}</span>
+    </div>`;
+
+  // Received / Change — only on completed (non-hold, non-quote) sales
+  const receivedRows = !isHold && !isQuotation ? [
+    show("show_amount_received") && sale.amount_received != null
+      ? `<div class="rcpt-row"><span>${escape(labels.received)}</span><span>LKR ${formatSaleRs(sale.amount_received)}</span></div>` : "",
+    show("show_change") && change != null
+      ? `<div class="rcpt-row"><span>${escape(labels.change)}</span><span>LKR ${formatSaleRs(change)}</span></div>` : "",
+    sale.outstanding_balance != null && sale.outstanding_balance > 0.001
+      ? `<div class="rcpt-row rcpt-row-note"><span>Outstanding balance</span><span>LKR ${formatSaleRs(sale.outstanding_balance)}</span></div>` : "",
+  ].filter(Boolean).join("") : "";
+
+  // ── Barcode ──────────────────────────────────────────────────────────────────
+  const receiptBarcodeSvg = sale.show_barcode && sale.barcode_value
+    ? buildBarcodeSvgMarkup(sale.barcode_value, { height: 34, width: 1.4 }) : null;
+  const barcodeHtml = receiptBarcodeSvg
+    ? `<div class="rcpt-barcode">
+        <div class="rcpt-barcode-bars">${receiptBarcodeSvg}</div>
+        <div class="rcpt-barcode-no">${escape(sale.barcode_value ?? "")}</div>
+      </div>` : "";
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -268,220 +414,276 @@ function buildThermalReceiptDocument(
   <meta charset="utf-8" />
   <meta name="viewport" content="width=80mm" />
   <title>${escape(sale.sales_id)}</title>
-  <style>${buildThermalReceiptStyles(marginTop)}</style>
+  <style>${buildThermalReceiptStyles(marginTop, rs)}</style>
 </head>
 <body>
   <div class="rcpt">
+
     ${logoHtml}
-    <div class="rcpt-store">${escape(header.company_name)}</div>
-    ${header.address_line ? `<div class="rcpt-sub">${escape(header.address_line)}</div>` : ""}
-    ${contactLine ? `<div class="rcpt-sub">${escape(contactLine)}</div>` : ""}
-    ${taxLine ? `<div class="rcpt-sub rcpt-tax">${escape(taxLine)}</div>` : ""}
+    ${show("show_shop_name") ? `<div class="rcpt-store">${escape(header.company_name)}</div>` : ""}
+    ${show("show_address") && header.address_line ? `<div class="rcpt-sub">${escape(header.address_line)}</div>` : ""}
+    ${phoneLine}${emailLine}${taxLine}
+    ${buildCustomFieldsHtml(rs?.custom_fields, "after_header")}
 
     <div class="rcpt-rule"></div>
 
-    <div class="rcpt-title">${escape(labels.receipt_title)}</div>
-    <div class="rcpt-inv-no">${escape(sale.sales_id)}</div>
+    <div class="rcpt-title">${titleText}</div>
+    ${billNoHtml}
+    ${currencyLine}
+    ${buildCustomFieldsHtml(rs?.custom_fields, "after_invoice")}
 
-    <div class="rcpt-rule rcpt-rule-light"></div>
+    <div class="rcpt-rule"></div>
 
-    <div class="rcpt-info">
-      <div class="rcpt-row"><span>${escape(labels.date)}</span><span>${escape(sale.sale_date)}</span></div>
-      <div class="rcpt-row"><span>${escape(labels.location)}</span><span>${escape(sale.location)}</span></div>
-      <div class="rcpt-row"><span>${escape(labels.customer)}</span><span>${escape(customerName)}</span></div>
+    <div class="rcpt-info">${infoRows}</div>
+
+    ${customerSection}
+
+    <div class="rcpt-rule"></div>
+
+    <table class="rcpt-items-table">
+      <thead>
+        <tr class="rcpt-col-headers">
+          <th class="rcpt-col-item">ITEM</th>
+          <th class="rcpt-col-qty">QTY</th>
+          <th class="rcpt-col-amt">AMOUNT</th>
+        </tr>
+      </thead>
+      <tbody>${itemRows || `<tr><td colspan="3" class="rcpt-empty">No items</td></tr>`}</tbody>
+    </table>
+
+    <div class="rcpt-rule"></div>
+    ${buildCustomFieldsHtml(rs?.custom_fields, "after_items")}
+
+    <div class="rcpt-totals">
+      ${subtotalRow}
+      ${discountRow}${serviceRow}${cardRow}
+      ${totalRow}
+      ${receivedRows}
     </div>
 
-    <div class="rcpt-rule"></div>
-
-    <div class="rcpt-items">
-      ${itemBlocks || `<div class="rcpt-empty">No items</div>`}
-    </div>
+    ${buildCustomFieldsHtml(rs?.custom_fields, "after_payment")}
 
     <div class="rcpt-rule"></div>
 
-    <div class="rcpt-totals">${totalLines}</div>
-
-    <div class="rcpt-rule rcpt-rule-double"></div>
-
-    <div class="rcpt-thanks">${escape(labels.thank_you)}</div>
-    <div class="rcpt-foot">${escape(new Date().toLocaleString())}</div>
+    ${show("show_thank_you") ? `<div class="rcpt-thanks">${escape(rs?.thank_you_message || labels.thank_you)}</div>` : ""}
+    ${show("show_footer_note") && rs?.footer_note ? `<div class="rcpt-foot-note">${escape(rs.footer_note)}</div>` : ""}
+    ${buildCustomFieldsHtml(rs?.custom_fields, "footer")}
     ${barcodeHtml}
     ${buildReceiptSoftwareFooterHtml("rcpt-software")}
+    <div class="rcpt-foot">Printed: ${escape(new Date().toLocaleString("en-GB", { day:"2-digit", month:"2-digit", year:"numeric", hour:"2-digit", minute:"2-digit" }))}</div>
+
   </div>
 </body>
 </html>`;
 }
 
-function buildThermalReceiptStyles(marginTop: string): string {
+function buildThermalReceiptStyles(marginTop: string, rs?: ReceiptSettings): string {
+  // The sizes the shop chose, or the values the receipt has always used.
+  const fontHeader = rs?.font_header ?? 14;
+  const fontInvoiceInfo = rs?.font_invoice_info ?? 11;
+  const fontItems = rs?.font_items ?? 11;
+  const fontTotals = rs?.font_totals ?? 12;
+  const fontFooter = rs?.font_footer ?? 10;
+
+  // Receipt length. Trimming the gap above each item row and around each block
+  // is what actually shortens the printout, which matters on an 80mm roll where
+  // a 30-line sale otherwise runs to a wasteful length.
+  const rowSpacing = rs?.row_spacing ?? 6;
+  const sectionSpacing = rs?.section_spacing ?? 8;
+
   return `
-    @page { size: 80mm auto; margin: 2mm 3mm; }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    html, body {
-      width: 80mm;
-      max-width: 80mm;
+    /* 80mm roll, but the TM-T82 only images 72mm (576 dots @ 203dpi).
+       Laying out at 80mm clips the right-aligned values off the page. */
+    @page { size: 72mm auto; margin: 0; }
+    /* A thermal head burns a dot or it does not — there is no grey. Any mid
+       tone is thrown away when the image is reduced to 1 bit, so every rule
+       below states pure black unconditionally, not only under @media print:
+       the QZ Tray path rasterises the on-screen view, where print rules never
+       apply. */
+    * { box-sizing: border-box; margin: 0; padding: 0; color: #000; }
+    /* html fills whatever it is shown in; body holds the true 72mm roll width
+       and centres inside it. Pinning both to 72mm left the receipt hard against
+       the left edge of the wider preview frame, reading as a cut right side. */
+    html {
+      width: 100%;
+      max-width: 100%;
+      margin: 0;
+      padding: 0;
+      background: #fff;
+    }
+    body {
+      width: 72mm;
+      max-width: 72mm;
       margin: 0 auto;
       padding: 0;
       padding-top: ${marginTop};
       background: #fff;
       color: #000;
       font-family: Arial, "Helvetica Neue", Helvetica, sans-serif;
-      font-size: 12px;
-      line-height: 1.35;
+      font-size: ${fontItems}px;
+      line-height: 1.4;
       -webkit-print-color-adjust: exact;
       print-color-adjust: exact;
     }
     .rcpt {
       width: 100%;
-      max-width: 74mm;
-      margin: 0 auto;
-      padding: 4mm 2mm 6mm;
+      padding: 2mm 2mm 6mm;
     }
     .rcpt-logo {
       display: block;
-      max-width: 36mm;
-      max-height: 14mm;
-      margin: 0 auto 3mm;
+      max-width: 40mm;
+      max-height: 16mm;
+      margin: 0 auto 2mm;
       object-fit: contain;
     }
     .rcpt-store {
       text-align: center;
-      font-size: 14px;
-      font-weight: 700;
+      font-size: ${fontHeader}px;
+      font-weight: 800;
       text-transform: uppercase;
-      letter-spacing: 0.04em;
       line-height: 1.25;
       word-wrap: break-word;
+      margin-bottom: 1mm;
     }
     .rcpt-sub {
       text-align: center;
       font-size: 10px;
-      color: #333;
-      margin-top: 2px;
+      color: #000;
+      margin-top: 1px;
       line-height: 1.35;
       word-wrap: break-word;
     }
     .rcpt-tax { font-size: 9px; }
     .rcpt-rule {
       border: none;
-      border-top: 1px dashed #000;
-      margin: 3mm 0;
+      border-top: 1px solid #000;
+      margin: ${sectionSpacing}px 0;
     }
-    .rcpt-rule-light { border-top-style: dotted; opacity: 0.7; }
-    .rcpt-rule-double {
-      border-top: 2px solid #000;
-      border-style: solid;
-      margin-top: 4mm;
+    .rcpt-custom {
+      margin-top: ${Math.max(2, Math.round(rowSpacing / 2))}px;
+      line-height: 1.35;
+      word-wrap: break-word;
     }
     .rcpt-title {
       text-align: center;
-      font-size: 10px;
+      font-size: ${fontHeader - 1}px;
       font-weight: 700;
-      letter-spacing: 0.12em;
+      letter-spacing: 0.06em;
       text-transform: uppercase;
+      margin-bottom: 1mm;
     }
     .rcpt-inv-no {
       text-align: center;
-      font-size: 13px;
+      font-size: ${fontInvoiceInfo}px;
       font-weight: 700;
-      font-family: "Courier New", Courier, monospace;
-      margin-top: 1mm;
-      letter-spacing: 0.05em;
+      margin-bottom: 1mm;
     }
-    .rcpt-info, .rcpt-totals { font-size: 11px; }
+    .rcpt-currency {
+      text-align: center;
+      font-size: 10px;
+      color: #000;
+    }
+    .rcpt-info { font-size: ${fontInvoiceInfo}px; margin-bottom: 1mm; }
+    .rcpt-section-title {
+      font-size: ${fontInvoiceInfo}px;
+      font-weight: 700;
+      margin: 1mm 0;
+    }
     .rcpt-row {
       display: flex;
       justify-content: space-between;
       align-items: baseline;
       gap: 2mm;
+      padding: ${rowSpacing / 2}px 0;
+    }
+    .rcpt-row span:first-child { color: #000; flex-shrink: 0; }
+    .rcpt-row span:last-child { font-weight: 600; text-align: right; word-break: break-word; }
+    .rcpt-row-sub span:first-child { font-weight: 400; }
+    .rcpt-row-sub span:last-child { font-weight: 600; }
+    .rcpt-row-grand {
+      font-size: ${fontTotals + 3}px;
+      font-weight: 800;
       padding: 1mm 0;
     }
-    .rcpt-row span:first-child {
-      color: #444;
-      flex-shrink: 0;
+    .rcpt-row-grand span:last-child { font-weight: 800; }
+    .rcpt-row-note { font-size: 10px; }
+    .rcpt-totals { font-size: ${fontTotals}px; }
+
+    /* Item table */
+    .rcpt-items-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: ${fontItems}px;
     }
-    .rcpt-row span:last-child {
-      font-weight: 600;
-      text-align: right;
-      word-break: break-word;
-    }
-    .rcpt-items { margin: 1mm 0; }
-    .rcpt-item {
-      padding: 2mm 0;
-      border-bottom: 1px dotted #ccc;
-    }
-    .rcpt-item:last-child { border-bottom: none; }
-    .rcpt-item-name {
-      font-weight: 600;
-      font-size: 11px;
-      line-height: 1.3;
-      word-wrap: break-word;
-      margin-bottom: 1mm;
-    }
-    .rcpt-item-detail {
-      display: flex;
-      justify-content: space-between;
-      font-size: 10px;
-      color: #333;
-    }
-    .rcpt-item-amt {
+    .rcpt-col-headers th {
       font-weight: 700;
-      font-size: 11px;
+      font-size: ${fontItems - 1}px;
+      border-bottom: 1px solid #000;
+      padding: 1mm 0;
+    }
+    .rcpt-col-item { text-align: left; width: 55%; }
+    .rcpt-col-qty  { text-align: center; width: 15%; }
+    .rcpt-col-amt  { text-align: right; width: 30%; }
+    .rcpt-item-name-row td { padding-top: ${rowSpacing}px; }
+    .rcpt-item-name-cell {
+      font-weight: 700;
+      font-size: ${fontItems}px;
+      word-wrap: break-word;
+    }
+    .rcpt-item-amt-cell {
+      text-align: right;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .rcpt-item-detail-row td { padding-bottom: ${rowSpacing}px; border-bottom: 1px solid #000; }
+    .rcpt-item-detail-cell {
+      font-size: ${Math.max(9, fontItems - 1)}px;
       color: #000;
     }
+    .rcpt-disc-cell {
+      font-size: ${Math.max(9, fontItems - 1)}px;
+      color: #000;
+      font-style: italic;
+      padding-bottom: ${rowSpacing}px;
+      border-bottom: 1px solid #000;
+    }
+    tbody tr:last-child td { border-bottom: none; }
     .rcpt-empty {
       text-align: center;
-      color: #666;
+      color: #000;
       padding: 3mm 0;
-      font-size: 11px;
     }
-    .rcpt-row-grand {
-      margin-top: 2mm;
-      padding-top: 2mm;
-      border-top: 1px solid #000;
-      font-size: 13px;
+
+    .rcpt-foot-note {
+      text-align: center;
+      font-size: ${fontFooter}px;
+      margin-top: ${sectionSpacing}px;
+      line-height: 1.35;
+      word-wrap: break-word;
     }
-    .rcpt-row-grand span:last-child {
-      font-size: 15px;
-      font-weight: 800;
-    }
-    .rcpt-row-note { font-size: 10px; }
     .rcpt-thanks {
       text-align: center;
-      font-size: 11px;
-      font-weight: 600;
-      margin: 3mm 0 2mm;
-    }
-    .rcpt-foot {
-      text-align: center;
-      font-size: 9px;
-      color: #555;
+      font-size: ${fontFooter + 1}px;
+      font-weight: 700;
+      margin: ${sectionSpacing}px 0 2px;
     }
     .rcpt-software {
       text-align: center;
       font-size: 9px;
-      color: #333;
-      margin-top: 3mm;
-      padding-top: 2mm;
-      border-top: 1px dotted #999;
+      color: #000;
+      margin-top: 2mm;
       font-weight: 600;
-      letter-spacing: 0.02em;
-      line-height: 1.35;
+      line-height: 1.4;
     }
-    .rcpt-barcode {
-      margin-top: 4mm;
+    .rcpt-foot {
       text-align: center;
+      font-size: ${Math.max(8, fontFooter - 1)}px;
+      color: #000;
+      margin-top: 1mm;
     }
-    .rcpt-barcode-bars {
-      height: 10mm;
-      width: 90%;
-      max-width: 60mm;
-      margin: 0 auto;
-      background: repeating-linear-gradient(
-        90deg,
-        #000 0 1.5px, transparent 1.5px 3px,
-        #000 3px 4px, transparent 4px 6px
-      );
-    }
+    .rcpt-barcode { margin-top: 3mm; text-align: center; }
+    .rcpt-barcode-bars { width: 90%; max-width: 60mm; margin: 0 auto; line-height: 0; }
+    .rcpt-barcode-bars svg { width: 100%; height: auto; display: block; }
     .rcpt-barcode-no {
       font-family: "Courier New", Courier, monospace;
       font-size: 10px;
@@ -489,9 +691,25 @@ function buildThermalReceiptStyles(marginTop: string): string {
       margin-top: 1mm;
     }
     @media print {
-      html, body { width: 80mm; padding: 0; padding-top: ${marginTop}; }
-      .rcpt { max-width: 100%; padding: 2mm 1mm; }
+      html, body { width: 72mm; max-width: 72mm; padding: 0; padding-top: ${marginTop}; }
+      .rcpt { padding: 2mm 2mm 4mm; }
     }
+    /* Raster path: the capture runs at exactly 288px so it doubles to the
+       head's 576 dots with no fractional scaling to blur the glyph edges.
+       html must be widened with body — left at 72mm (272px) it clips the
+       last ~16px of every row off the right edge. */
+    html.rcpt-raster,
+    body.rcpt-raster,
+    body.rcpt-raster > .rcpt {
+      width: 288px;
+      max-width: 288px;
+      padding-top: 0;
+    }
+    /* Fixed layout keeps the declared column widths authoritative: an amount
+       that cannot wrap would otherwise stretch the table past the capture
+       width and lose its right-hand digits. */
+    .rcpt-items-table { table-layout: fixed; }
+    .rcpt-item-amt-cell { white-space: normal; word-break: break-word; }
   `;
 }
 
@@ -535,13 +753,17 @@ function buildA4ReceiptDocument(
     )
     .join("");
 
-  const barcodeHtml =
+  const invoiceBarcodeSvg =
     sale.show_barcode && sale.barcode_value
-      ? `<div class="inv-barcode">
-          <div class="inv-barcode-bars" aria-hidden="true"></div>
-          <span class="inv-barcode-text">${escape(sale.barcode_value)}</span>
+      ? buildBarcodeSvgMarkup(sale.barcode_value, { height: 26, width: 1.2 })
+      : null;
+
+  const barcodeHtml = invoiceBarcodeSvg
+    ? `<div class="inv-barcode">
+          <div class="inv-barcode-bars">${invoiceBarcodeSvg}</div>
+          <span class="inv-barcode-text">${escape(sale.barcode_value ?? "")}</span>
         </div>`
-      : "";
+    : "";
 
   const totalRows = [
     `<div class="inv-total-row"><span>${escape(labels.sub_total)}</span><span>${formatSaleRs(sale.sub_total)}</span></div>`,
@@ -736,10 +958,8 @@ function buildA4ReceiptStyles(options: SaleReceiptPrintOptions, _style: SalesRec
     .inv-invoice-mini dt { font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; font-size: 8px; }
     .inv-invoice-mini dd { color: ${INK}; font-weight: 600; }
     .inv-barcode { margin-top: 10px; text-align: right; }
-    .inv-barcode-bars {
-      height: 24px; width: 110px; margin-left: auto;
-      background: repeating-linear-gradient(90deg, #111 0 2px, transparent 2px 4px, #111 4px 5px, transparent 5px 8px);
-    }
+    .inv-barcode-bars { width: 130px; margin-left: auto; line-height: 0; }
+    .inv-barcode-bars svg { width: 100%; height: auto; display: block; }
     .inv-barcode-text { display: block; margin-top: 3px; font-size: 9px; font-family: ${mono}; letter-spacing: 0.06em; }
     .inv-details-grid {
       display: grid; grid-template-columns: 1fr 1fr; gap: 16px;

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
   Button,
@@ -43,6 +43,8 @@ interface PosCustomerSelectAreaProps {
   selectedCustomerId: number | null;
   selectedCustomerName?: string | null;
   onSelect: (customer: Customer | null) => void;
+  /** Bump to open the picker from outside — the till's F5 shortcut. */
+  openSignal?: number;
 }
 
 const PosCustomerSelectArea: React.FC<PosCustomerSelectAreaProps> = ({
@@ -51,8 +53,19 @@ const PosCustomerSelectArea: React.FC<PosCustomerSelectAreaProps> = ({
   selectedCustomerId,
   selectedCustomerName,
   onSelect,
+  openSignal,
 }) => {
   const [dialogOpen, setDialogOpen] = useState(false);
+
+  // Opens only on a change after mount, so the picker does not pop up the
+  // moment the till loads.
+  const lastOpenSignal = useRef(openSignal);
+  useEffect(() => {
+    if (openSignal !== undefined && openSignal !== lastOpenSignal.current) {
+      lastOpenSignal.current = openSignal;
+      setDialogOpen(true);
+    }
+  }, [openSignal]);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
   const [rowsPerPage, setRowsPerPage] = useState(10);

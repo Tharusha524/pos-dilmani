@@ -76,6 +76,11 @@ class OfferController extends Controller
                 'lines.*.qty' => 'required|numeric|min:0.01',
                 'lines.*.unit_price' => 'required|numeric|min:0',
                 'lines.*.item_batch_id' => 'nullable|integer|exists:item_batches,id',
+                // Without these the validator strips each line's own discount,
+                // so the preview would price the cart as if it had none and
+                // show the cashier a total the saved sale would not match.
+                'lines.*.discount_type' => 'nullable|in:percent,amount',
+                'lines.*.discount_value' => 'nullable|numeric|min:0',
             ]);
 
             $offer = $this->offerDiscountService->resolveOfferForUser(

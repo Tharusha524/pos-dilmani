@@ -1,6 +1,7 @@
 import type { SvgIconComponent } from "@mui/icons-material";
 import CategoryIcon from "@mui/icons-material/Category";
 import LayersIcon from "@mui/icons-material/Layers";
+import QrCode2Icon from "@mui/icons-material/QrCode2";
 import SettingsIcon from "@mui/icons-material/Settings";
 
 export interface InventoryShortcut {
@@ -30,5 +31,11 @@ export const INVENTORY_SHORTCUTS: InventoryShortcut[] = [
     description: "Manage item categories and sub categories",
     path: "categories",
     icon: LayersIcon,
+  },
+  {
+    title: "Barcode Labels",
+    description: "Print barcode stickers with item name, price, and barcode",
+    path: "barcode-labels",
+    icon: QrCode2Icon,
   },
 ];

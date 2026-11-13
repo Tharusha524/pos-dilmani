@@ -1,4 +1,4 @@
-﻿import React, { useCallback, useEffect, useMemo, useState } from "react";
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSnackbar } from "notistack";
@@ -12,11 +12,13 @@ import {
   type OrderStatus,
   type Sale,
   type SalePayload,
+  type SaleReceiptApiPayload,
 } from "../../../api/salesApi";
 import {
   getItems,
   getItemInventoryBreakdown,
   getItemCategoriesByLocation,
+  type DiscountType,
   type Item,
   type ItemBatch,
 } from "../../../api/itemsApi";
@@ -27,7 +29,7 @@ import { getFriendlyErrorMessage } from "../../../utils/getFriendlyErrorMessage"
 import { invalidatePosQueries } from "../../../utils/invalidatePosQueries";
 import type { SaleLineDraft } from "./SaleLineItemsSection";
 import { linesFromSale, linesToPayload } from "./SaleLineItemsSection";
-import { emptySaleForm, SALES_BASE } from "./saleFormUtils";
+import { emptySaleForm, formatSaleRs, SALES_BASE } from "./saleFormUtils";
 import { DEFAULT_TRANSACTION_TYPE, TRANSACTION_TYPE_RETURN } from "./saleConstants";
 import {
   canIncreaseCartQty,
@@ -80,6 +82,31 @@ import { PosSaleContext } from "./posSaleContext";
 import type { PosSaleSession, PosSaleView } from "./posSaleSessionTypes";
 import PosProductSelectPage from "./PosProductSelectPage";
 import PosSaleCheckoutPage from "./PosSaleCheckoutPage";
+import PosScanCheckoutPage from "./PosScanCheckoutPage";
+import PosBarcodeMatchDialog from "./PosBarcodeMatchDialog";
+import PosReceiptPreviewDialog from "./PosReceiptPreviewDialog";
+import PosReprintDialog from "./PosReprintDialog";
+import PosQuickAddCustomerDialog from "./PosQuickAddCustomerDialog";
+import CameraBarcodeScanDialog from "./CameraBarcodeScanDialog";
+import {
+  isDuplicateScan,
+  matchScannedCodeInCatalog,
+  searchCatalogItems,
+} from "./posBarcodeScan";
+import { parseScannedCode } from "../../../utils/barcode";
+import { billBelowCost, findBelowCostLines } from "./posBelowCost";
+import {
+  splitsToPayload,
+  splitsValidationError,
+  type PaymentSplitLine,
+} from "./posPaymentSplits";
+import {
+  defaultDiscountForItem,
+  maxDiscountValueFor,
+  normalizeDiscountType,
+  priceLine,
+} from "./posLineDiscount";
+import { lookupItemByBarcode } from "../../../api/itemsApi";
 import { printSaleReceiptFromApi } from "./saleReceiptPrint";
 import {
   filterPosCatalogItems,
@@ -96,10 +123,20 @@ function itemToLine(
   item: Item,
   salesType: PosSalesPriceMode,
   qty = 1,
-  batch?: ItemBatch | null
+  batch?: ItemBatch | null,
+  allowItemDiscount = true
 ): SaleLineDraft {
   const price = unitPriceForBatchSale(item, salesType, batch);
   const q = roundSaleQty(qty);
+  // A new line starts with the discount set on the item itself. It used to
+  // start at full price, so a discount configured on the item never applied.
+  const discount = defaultDiscountForItem(item, allowItemDiscount);
+  const priced = priceLine({
+    qty: q,
+    unit_price: price,
+    discount_type: discount?.discount_type ?? null,
+    discount_value: discount?.discount_value ?? 0,
+  });
   return {
     key: newLineKey(),
     item_id: item.id,
@@ -107,7 +144,10 @@ function itemToLine(
     description: item.description,
     qty: q,
     unit_price: price,
-    line_total: Math.round(q * price * 100) / 100,
+    discount_type: priced.discount_type,
+    discount_value: priced.discount_value,
+    discount_amount: priced.discount_amount,
+    line_total: priced.line_total,
     batch_id: batch?.batch_number ?? null,
     item_batch_id: batch?.id ?? null,
     batch_stock_qty: batch?.qty ?? item.qty ?? undefined,
@@ -117,7 +157,18 @@ function itemToLine(
   };
 }
 
-const PosSaleFormPage: React.FC = () => {
+interface PosSaleFormPageProps {
+  /**
+   * Which view the sale opens on. The scan lane and the catalog grid are two
+   * doors into the same session, so the route picks the door rather than each
+   * being a separate page with its own copy of the cart.
+   */
+  initialView?: PosSaleView;
+}
+
+const PosSaleFormPage: React.FC<PosSaleFormPageProps> = ({
+  initialView = "products",
+}) => {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
@@ -140,8 +191,25 @@ const PosSaleFormPage: React.FC = () => {
   const [offerDiscount, setOfferDiscount] = useState(0);
   const [offerPreview, setOfferPreview] = useState<OfferPreviewResult | null>(null);
   const [activeHoldSaleId, setActiveHoldSaleId] = useState<number | null>(null);
-  const [holdPin, setHoldPin] = useState("");
-  const [view, setView] = useState<PosSaleView>("products");
+  const [view, setView] = useState<PosSaleView>(initialView);
+  const [scanInput, setScanInput] = useState("");
+  const [scanBusy, setScanBusy] = useState(false);
+  const [scanRefocusToken, setScanRefocusToken] = useState(0);
+  const [cameraScanOpen, setCameraScanOpen] = useState(false);
+  const [pendingScanItem, setPendingScanItem] = useState<Item | null>(null);
+  const [receiptPreview, setReceiptPreview] = useState<SaleReceiptApiPayload | null>(null);
+  const [reprintOpen, setReprintOpen] = useState(false);
+  const [quickAddCustomerOpen, setQuickAddCustomerOpen] = useState(false);
+  const [customerOpenSignal, setCustomerOpenSignal] = useState(0);
+  const [splitMode, setSplitMode] = useState(false);
+  const [paymentSplits, setPaymentSplits] = useState<PaymentSplitLine[]>([]);
+  const [pendingScanQty, setPendingScanQty] = useState("1");
+  const [pendingScanPrice, setPendingScanPrice] = useState("0");
+  const [pendingScanDiscountType, setPendingScanDiscountType] = useState<DiscountType>("percent");
+  const [pendingScanDiscountValue, setPendingScanDiscountValue] = useState("0");
+  const [barcodeMatches, setBarcodeMatches] = useState<Item[]>([]);
+  const [barcodeMatchCode, setBarcodeMatchCode] = useState("");
+  const lastScanRef = useRef<{ code: string; at: number } | null>(null);
   const [searchParams] = useSearchParams();
 
   const { defaultLocation, locations, manageMultiple } = useBranchLocations([], {
@@ -240,6 +308,8 @@ const PosSaleFormPage: React.FC = () => {
   const allowOffers = posContext?.order_settings?.allow_offer !== false;
 
   const allowWholesalePrice = itemsData?.item_settings?.allow_wholesale_price !== false;
+  /** Same switch that shows the discount fields on the item form. */
+  const allowItemDiscount = itemsData?.item_settings?.allow_item_discount !== false;
   const salesPriceMode: PosSalesPriceMode = isWholesaleSalesType(form.sales_type)
     ? "Wholesale"
     : "Retail";
@@ -247,6 +317,8 @@ const PosSaleFormPage: React.FC = () => {
   const allowNegativeInventory = orderSettings?.allow_sales_negative_inventory === true;
   const allowPriceSwitch = orderSettings?.allow_switching_wholesale_retail_prices !== false;
   const allowEditSellingPrice = orderSettings?.allow_edit_selling_price !== false;
+  /** Off by default: a sale may not price goods below their purchase price. */
+  const allowSaleBelowCost = orderSettings?.allow_sale_below_cost === true;
   const showBothPricesOnCards =
     orderSettings?.allow_view_wholesale_retail_prices_by_clicking !== false;
   const allowDeliveryCharge = orderSettings?.allow_service_charge !== false;
@@ -378,7 +450,10 @@ const PosSaleFormPage: React.FC = () => {
         setPaymentMethod(method);
         setAmountReceived(sale.amount_received ?? sale.net_amount);
         setChequeDetails(null);
-        setView("checkout");
+        // Stay in the lane the cashier is working in: the scan till resumes
+        // in place (fullscreen intact), the classic flow goes to its payment
+        // step as it always has.
+        setView(initialView === "scan" ? "scan" : "checkout");
         enqueueSnackbar(`Loaded hold order ${sale.sales_id}`, { variant: "info" });
       })
       .catch((err: unknown) => {
@@ -440,6 +515,47 @@ const PosSaleFormPage: React.FC = () => {
     () => grandTotalWithVat(taxableAmount, vatBreakdown.vatAmount) + deliveryCharge,
     [taxableAmount, vatBreakdown.vatAmount, deliveryCharge]
   );
+
+  const itemCostById = useMemo(
+    () => new Map(rawCatalogItems.map((item) => [item.id, item])),
+    [rawCatalogItems]
+  );
+
+  /** Lines a discount or price has taken below cost — shown in red. */
+  const belowCostLines = useMemo(
+    () => (allowSaleBelowCost ? [] : findBelowCostLines(lines, itemCostById)),
+    [allowSaleBelowCost, lines, itemCostById]
+  );
+
+  /**
+   * Why this sale would be refused for selling below cost, or null.
+   * Mirrors the server's check so the cashier hears it before pressing Pay.
+   */
+  const belowCostMessage = useMemo(() => {
+    if (allowSaleBelowCost) return null;
+
+    const first = belowCostLines[0];
+    if (first) {
+      const more = belowCostLines.length > 1 ? ` (+${belowCostLines.length - 1} more)` : "";
+      return `${first.label} is below cost: Rs ${first.netUnit.toFixed(2)} against a cost of Rs ${first.unitCost.toFixed(2)}${more}.`;
+    }
+
+    const billDiscount =
+      (Number(form.discount) || 0) +
+      (selectedOffer?.discount_type === "order" ? offerDiscount : 0);
+    const bill = billBelowCost(lines, itemCostById, billDiscount);
+    return bill
+      ? `This discount takes the bill below cost: Rs ${bill.net.toFixed(2)} against a cost of Rs ${bill.cost.toFixed(2)}.`
+      : null;
+  }, [
+    allowSaleBelowCost,
+    belowCostLines,
+    form.discount,
+    selectedOffer,
+    offerDiscount,
+    lines,
+    itemCostById,
+  ]);
 
   const changeDue = useMemo(() => {
     if (paymentMethod === "Credit") return 0;
@@ -543,18 +659,13 @@ const PosSaleFormPage: React.FC = () => {
       setLines((prev) =>
         prev.map((l) => {
           if (l.key !== existing.key) return l;
-          const qty = roundSaleQty(l.qty + qtyToAdd);
-          return {
-            ...l,
-            qty,
-            line_total: Math.round(qty * l.unit_price * 100) / 100,
-          };
+          return priceLine({ ...l, qty: roundSaleQty(l.qty + qtyToAdd) });
         })
       );
     } else {
       setLines((prev) => [
         ...prev,
-        itemToLine(saleItem, salesPriceMode, qtyToAdd, batch),
+        itemToLine(saleItem, salesPriceMode, qtyToAdd, batch, allowItemDiscount),
       ]);
     }
   };
@@ -588,12 +699,11 @@ const PosSaleFormPage: React.FC = () => {
       } else if (existingUnbatched) {
         nextLines = nextLines.map((l) => {
           if (l.key !== existingUnbatched.key) return l;
-          const q = roundSaleQty(l.qty + roundedUnbatchedQty);
-          return { ...l, qty: q, line_total: Math.round(q * l.unit_price * 100) / 100 };
+          return priceLine({ ...l, qty: roundSaleQty(l.qty + roundedUnbatchedQty) });
         });
         added += 1;
       } else {
-        nextLines = [...nextLines, itemToLine(saleItem, salesPriceMode, roundedUnbatchedQty, null)];
+        nextLines = [...nextLines, itemToLine(saleItem, salesPriceMode, roundedUnbatchedQty, null, allowItemDiscount)];
         added += 1;
       }
     }
@@ -624,11 +734,10 @@ const PosSaleFormPage: React.FC = () => {
       if (existing) {
         nextLines = nextLines.map((l) => {
           if (l.key !== existing.key) return l;
-          const q = roundSaleQty(l.qty + qtyToAdd);
-          return { ...l, qty: q, line_total: Math.round(q * l.unit_price * 100) / 100 };
+          return priceLine({ ...l, qty: roundSaleQty(l.qty + qtyToAdd) });
         });
       } else {
-        nextLines = [...nextLines, itemToLine(saleItem, salesPriceMode, qtyToAdd, batch)];
+        nextLines = [...nextLines, itemToLine(saleItem, salesPriceMode, qtyToAdd, batch, allowItemDiscount)];
       }
       added += 1;
     }
@@ -733,19 +842,253 @@ const PosSaleFormPage: React.FC = () => {
     );
     const termLower = term.toLowerCase();
     const match =
+      // Barcode first: an exact barcode is the strongest possible signal, and
+      // without this a code could lose to a loose match on another field.
+      candidates.find((i) => (i.barcode ?? "").toLowerCase() === termLower) ??
       candidates.find((i) => i.item_number.toLowerCase() === termLower) ??
       candidates.find((i) => (i.item_code ?? "").toLowerCase() === termLower) ??
       candidates.find((i) => (i.sku ?? "").toLowerCase() === termLower) ??
-      candidates[0];
+      // Only a single remaining candidate may be taken implicitly. Falling
+      // back to "the first of several" would quietly bill the wrong product
+      // whenever a typed term matched more than one item.
+      (candidates.length === 1 ? candidates[0] : undefined);
 
     if (!match) {
-      enqueueSnackbar("No product found for that search.", { variant: "warning" });
+      enqueueSnackbar(
+        candidates.length > 1
+          ? `${candidates.length} products match "${term}" — pick one from the grid.`
+          : "No product found for that search.",
+        { variant: "warning" }
+      );
       return;
     }
 
     addItemToCart(match, qty ?? 1);
     setCatalogSearch("");
   };
+
+  /**
+   * Suggestions for whatever is currently in the scan/search box.
+   *
+   * Recomputed as the cashier types so the dropdown tracks each keystroke.
+   * A scan arrives as one burst of keystrokes, so this fills in for it too —
+   * the scanned item simply appears in the list like any other result.
+   */
+  const parsedScanInput = useMemo(() => parseScannedCode(scanInput), [scanInput]);
+
+  const scanResults = useMemo(
+    // Searched on the code alone: a leading "5*" is a quantity, not part of
+    // what the cashier is looking for, so including it would match nothing.
+    () => searchCatalogItems(parsedScanInput.code, catalogItems),
+    [parsedScanInput.code, catalogItems]
+  );
+
+  /**
+   * Put the chosen item in the cart.
+   *
+   * Reaching the cart always goes through here — from a dropdown click, a
+   * keyboard pick, or Enter on a scan — so an item can never be billed
+   * without the cashier having seen it on screen first.
+   */
+  /**
+   * Step one of adding an item: hold it, and ask for the quantity.
+   *
+   * Nothing reaches the cart here. Picking an item opens a quantity step
+   * instead, so the cashier confirms both what is being sold and how many
+   * before it is billed — the common case of "three of the same shirt" is
+   * then one scan and a number, rather than one scan per garment.
+   */
+  const selectScanItem = useCallback(
+    (chosen: Item) => {
+      setPendingScanItem(chosen);
+      // A quantity typed into the box ("5*CODE") carries through, so that
+      // shorthand still works; otherwise start at one.
+      setPendingScanQty(String(parsedScanInput.qty ?? 1));
+      // The entry row starts at the price the cart would use and the item's
+      // own default discount, so pressing Enter straight through changes
+      // nothing — the fields are there only for when the cashier needs them.
+      setPendingScanPrice(String(getPosItemUnitPrice(chosen, salesPriceMode) ?? 0));
+      const discount = defaultDiscountForItem(chosen, allowItemDiscount);
+      setPendingScanDiscountType(discount?.discount_type ?? "percent");
+      setPendingScanDiscountValue(String(discount?.discount_value ?? 0));
+      setScanInput("");
+    },
+    [parsedScanInput.qty, salesPriceMode, allowItemDiscount]
+  );
+
+  /**
+   * Step two: price, discount and quantity confirmed, so the item is billed.
+   *
+   * The item goes in through the normal add path (stock checks, merging into
+   * an existing line), then the entered price and discount are applied to the
+   * line it landed on — through priceLine, the same arithmetic as everywhere
+   * else, with the discount clamped to the item's maximum.
+   */
+  const commitPendingScanItem = useCallback(() => {
+    if (!pendingScanItem) return;
+
+    const qty = Number(pendingScanQty);
+    // A blank or nonsense quantity means one, not zero — a zero-quantity line
+    // would silently add nothing and look like the scan failed.
+    const addQty = Number.isFinite(qty) && qty > 0 ? qty : 1;
+
+    const typedPrice = Math.max(0, Math.round((Number(pendingScanPrice) || 0) * 100) / 100);
+    const catalogPrice = Number(getPosItemUnitPrice(pendingScanItem, salesPriceMode) ?? 0);
+    const priceChanged = allowEditSellingPrice && Math.abs(typedPrice - catalogPrice) > 0.004;
+    const unitPrice = priceChanged ? typedPrice : catalogPrice;
+
+    let discountValue = allowItemDiscount
+      ? Math.max(0, Math.round((Number(pendingScanDiscountValue) || 0) * 100) / 100)
+      : 0;
+    if (pendingScanDiscountType === "percent") discountValue = Math.min(100, discountValue);
+
+    const ceiling = maxDiscountValueFor(
+      addQty,
+      unitPrice,
+      pendingScanDiscountType,
+      Number(pendingScanItem.max_discount ?? 0),
+      normalizeDiscountType(pendingScanItem.max_discount_type)
+    );
+    if (ceiling !== null && discountValue > ceiling) {
+      enqueueSnackbar(
+        `Maximum discount for ${pendingScanItem.description} is ${
+          pendingScanDiscountType === "amount" ? formatSaleRs(ceiling) + " per unit" : ceiling + "%"
+        }.`,
+        { variant: "warning" }
+      );
+      discountValue = ceiling;
+    }
+
+    // Refuse before the item is added, rather than adding it and then
+    // refusing the whole sale at Pay.
+    if (!allowSaleBelowCost) {
+      const cost = Math.max(0, Number(pendingScanItem.purchase_price ?? 0));
+      const net = priceLine({
+        qty: addQty,
+        unit_price: unitPrice,
+        discount_type: pendingScanDiscountType,
+        discount_value: discountValue,
+      });
+      if (cost > 0 && net.line_total / addQty < cost - 0.005) {
+        enqueueSnackbar(
+          `${pendingScanItem.description} would sell below cost: Rs ${(net.line_total / addQty).toFixed(2)} against a cost of Rs ${cost.toFixed(2)}.`,
+          { variant: "error" }
+        );
+        return;
+      }
+    }
+
+    addItemToCart(pendingScanItem, addQty);
+
+    // Applied after the add, to the main (unbatched) line for this product.
+    // Matched by item_number because the line may carry the sale branch's
+    // copy of the item, whose id differs from the one that was scanned.
+    const itemNumber = pendingScanItem.item_number;
+    const defaultDiscount = defaultDiscountForItem(pendingScanItem, allowItemDiscount);
+    const discountChanged =
+      discountValue !== (defaultDiscount?.discount_value ?? 0) ||
+      (discountValue > 0 && pendingScanDiscountType !== (defaultDiscount?.discount_type ?? "percent"));
+
+    if (priceChanged || discountChanged) {
+      setLines((prev) =>
+        prev.map((l) =>
+          l.item_number === itemNumber && l.item_batch_id == null
+            ? priceLine({
+                ...l,
+                unit_price: unitPrice,
+                discount_type: discountValue > 0 ? pendingScanDiscountType : null,
+                discount_value: discountValue,
+              })
+            : l
+        )
+      );
+    }
+
+    setPendingScanItem(null);
+    setPendingScanQty("1");
+    setScanRefocusToken((t) => t + 1);
+  }, [
+    pendingScanItem,
+    pendingScanQty,
+    pendingScanPrice,
+    pendingScanDiscountType,
+    pendingScanDiscountValue,
+    salesPriceMode,
+    allowEditSellingPrice,
+    allowItemDiscount,
+    allowSaleBelowCost,
+    addItemToCart,
+    enqueueSnackbar,
+  ]);
+
+  const cancelPendingScan = useCallback(() => {
+    setPendingScanItem(null);
+    setPendingScanQty("1");
+    setScanRefocusToken((t) => t + 1);
+  }, []);
+
+  /**
+   * Handle Enter in the scan/search box, and codes from the camera.
+   *
+   * Deliberately does NOT add anything on its own. A scanned code resolves to
+   * its item and shows it in the list for the cashier to confirm, because at a
+   * counter the wrong garment under the beam is easy to miss and a silently
+   * billed item is only noticed at the total.
+   *
+   * The one case that does fall through to the server is a code that matches
+   * nothing loaded in the browser — items outside the current branch scope.
+   */
+  const handleScannedCode = useCallback(
+    async (raw: string) => {
+      const { code } = parseScannedCode(raw);
+      if (!code) return;
+
+      // A scanner can fire twice for one pass of the beam, and a garment left
+      // on the glass repeats continuously. Ignoring the repeat keeps the list
+      // from flickering while the cashier is reading it.
+      if (
+        isDuplicateScan(
+          code,
+          lastScanRef.current?.code ?? null,
+          lastScanRef.current?.at ?? null
+        )
+      ) {
+        return;
+      }
+      lastScanRef.current = { code, at: Date.now() };
+
+      // Already visible in the dropdown — nothing more to fetch or say.
+      if (matchScannedCodeInCatalog(code, catalogItems).length > 0) {
+        return;
+      }
+      if (searchCatalogItems(code, catalogItems).length > 0) {
+        return;
+      }
+
+      setScanBusy(true);
+      try {
+        const result = await lookupItemByBarcode(code, catalogLocation);
+
+        if (result.items.length > 0) {
+          // Found outside the loaded catalog: show it for confirmation the
+          // same way a local match is shown.
+          setBarcodeMatchCode(code);
+          setBarcodeMatches(result.items);
+        } else {
+          enqueueSnackbar(`No item found for "${code}".`, { variant: "warning" });
+        }
+      } catch (err) {
+        enqueueSnackbar(
+          getFriendlyErrorMessage(err, `No item found for "${code}".`),
+          { variant: "warning" }
+        );
+      } finally {
+        setScanBusy(false);
+        setScanRefocusToken((t) => t + 1);
+      }
+    },
+    [catalogItems, catalogLocation, enqueueSnackbar]
+  );
 
   const setLineQty = (key: string, rawQty: number) => {
     const line = lines.find((l) => l.key === key);
@@ -774,11 +1117,7 @@ const PosSaleFormPage: React.FC = () => {
     setLines((prev) =>
       prev.map((l) => {
           if (l.key !== key) return l;
-          return {
-            ...l,
-            qty,
-            line_total: Math.round(qty * l.unit_price * 100) / 100,
-          };
+          return priceLine({ ...l, qty });
         })
     );
   };
@@ -813,16 +1152,56 @@ const PosSaleFormPage: React.FC = () => {
     setLineQty(key, nextQty);
   };
 
+  /**
+   * Change one line's discount.
+   *
+   * Clamped to the item's maximum here, at the point of entry, so the server
+   * — which rejects anything over the maximum — never refuses a sale the
+   * cashier has already quoted. The cashier is told when a value is cut.
+   */
+  const setLineDiscount = (key: string, type: DiscountType, rawValue: number) => {
+    const line = lines.find((l) => l.key === key);
+    if (!line) return;
+
+    const catalogItem = rawCatalogItems.find((i) => i.id === line.item_id);
+    let value = Math.max(0, Math.round((Number(rawValue) || 0) * 100) / 100);
+
+    if (catalogItem) {
+      const ceiling = maxDiscountValueFor(
+        line.qty,
+        line.unit_price,
+        type,
+        Number(catalogItem.max_discount ?? 0),
+        normalizeDiscountType(catalogItem.max_discount_type)
+      );
+
+      if (ceiling !== null && value > ceiling) {
+        enqueueSnackbar(
+          `Maximum discount for ${line.description} is ${
+            type === "amount" ? formatSaleRs(ceiling) + " per unit" : ceiling + "%"
+          }.`,
+          { variant: "warning" }
+        );
+        value = ceiling;
+      }
+    }
+
+    // A percent value above 100 is never meaningful.
+    if (type === "percent") value = Math.min(100, value);
+
+    setLines((prev) =>
+      prev.map((l) =>
+        l.key === key ? priceLine({ ...l, discount_type: type, discount_value: value }) : l
+      )
+    );
+  };
+
   const setLineUnitPrice = (key: string, rawPrice: number) => {
     const unitPrice = Math.max(0, Math.round(rawPrice * 100) / 100);
     setLines((prev) =>
       prev.map((l) => {
         if (l.key !== key) return l;
-        return {
-          ...l,
-          unit_price: unitPrice,
-          line_total: Math.round(l.qty * unitPrice * 100) / 100,
-        };
+        return priceLine({ ...l, unit_price: unitPrice });
       })
     );
   };
@@ -842,25 +1221,42 @@ const PosSaleFormPage: React.FC = () => {
   };
 
   const finishSaleWithReceipt = async (receipt?: Parameters<typeof printSaleReceiptFromApi>[0]) => {
-      invalidatePosQueries(queryClient);
-      const autoPrint =
-        hardwareSettings?.allow_auto_print ?? receipt?.print_options.allow_auto_print ?? true;
+    invalidatePosQueries(queryClient);
+    const autoPrint =
+      hardwareSettings?.allow_auto_print ?? receipt?.print_options.allow_auto_print ?? true;
+
+    // The scan lane is a till: the receipt is shown on screen (Enter prints,
+    // Enter again starts the next customer) and the lane clears itself for
+    // the next sale. It does not download a PNG of every receipt — that suits
+    // the back office, but at a counter it fills the Downloads folder.
+    if (initialView === "scan") {
+      setActiveHoldSaleId(null);
+      resetPosForNewSale();
       if (receipt) {
-        if (autoPrint) {
-          printSaleReceiptFromApi(receipt);
-        }
-        try {
-          await downloadSaleReceiptImageFromApi(receipt);
-        enqueueSnackbar("Sale completed â€” receipt PNG downloaded", { variant: "success" });
-        } catch (imgErr) {
-        const imgMsg = imgErr instanceof Error ? imgErr.message : "Receipt image download failed";
-        enqueueSnackbar(`Sale completed â€” ${imgMsg}`, { variant: "warning" });
-        }
+        setReceiptPreview(receipt);
       } else {
         enqueueSnackbar("Sale completed", { variant: "success" });
+        setScanRefocusToken((t) => t + 1);
       }
+      return;
+    }
+
+    if (receipt) {
+      if (autoPrint) {
+        printSaleReceiptFromApi(receipt);
+      }
+      try {
+        await downloadSaleReceiptImageFromApi(receipt);
+        enqueueSnackbar("Sale completed — receipt PNG downloaded", { variant: "success" });
+      } catch (imgErr) {
+        const imgMsg = imgErr instanceof Error ? imgErr.message : "Receipt image download failed";
+        enqueueSnackbar(`Sale completed — ${imgMsg}`, { variant: "warning" });
+      }
+    } else {
+      enqueueSnackbar("Sale completed", { variant: "success" });
+    }
     setActiveHoldSaleId(null);
-      navigate(SALES_BASE);
+    navigate(SALES_BASE);
   };
 
   const saveMutation = useMutation({
@@ -890,14 +1286,15 @@ const PosSaleFormPage: React.FC = () => {
 
   const resetPosForNewSale = () => {
     setActiveHoldSaleId(null);
-    setHoldPin("");
+    setSplitMode(false);
+    setPaymentSplits([]);
     setLines([]);
     setPaymentMethod("Cash");
     setAmountReceived(0);
     setChequeDetails(null);
     setOfferDiscount(0);
     setOfferPreview(null);
-    setView("products");
+    setView(initialView);
     setForm((prev) => ({
       ...emptySaleForm(),
       location: prev.location ?? defaultLocation,
@@ -964,8 +1361,7 @@ const PosSaleFormPage: React.FC = () => {
     setPaymentMethod(method);
     setAmountReceived(sale.amount_received ?? sale.net_amount);
       setChequeDetails(null);
-    setHoldPin("");
-    setView("checkout");
+    setView(initialView === "scan" ? "scan" : "checkout");
     enqueueSnackbar(`Loaded hold order ${sale.sales_id}`, { variant: "info" });
   };
 
@@ -1011,22 +1407,26 @@ const PosSaleFormPage: React.FC = () => {
       offer_promo_code: form.offer_promo_code?.trim()
         ? form.offer_promo_code.trim().toUpperCase()
         : null,
-      payment_method: paymentMethod,
-      amount_received: paymentMethod === "Credit" ? netAmount : amountReceived,
+      payment_method: splitMode ? "Split" : paymentMethod,
+      // A split records exactly the total — the server rejects change inside
+      // a split, so there is no "received" figure beyond it.
+      amount_received: splitMode || paymentMethod === "Credit" ? netAmount : amountReceived,
+      ...(splitMode ? { payment_splits: splitsToPayload(paymentSplits) } : {}),
       bank_id: null,
-      cheque_number: null,
+      // Only sent for cheque payments: a stale value left over from a cheque
+      // the cashier started and then switched away from would otherwise be
+      // saved against a cash sale.
+      cheque_number:
+        paymentMethod === "Cheque" ? (chequeDetails?.cheque_number ?? null) : null,
+      bank_name: paymentMethod === "Cheque" ? (chequeDetails?.bank_name ?? null) : null,
       items: linesToPayload(lines),
-      notes: chequeDetails ? `Cheque payment - ${chequeDetails.bank_name}` : form.notes,
-      ...(activeHoldSaleId && holdPin.trim() ? { hold_pin: holdPin.trim() } : {}),
-    };
+      notes:
+        paymentMethod === "Cheque" && chequeDetails
+          ? `Cheque payment - ${chequeDetails.bank_name} #${chequeDetails.cheque_number}`
+          : form.notes,
+      };
   };
 
-  const requireHoldPin = (): boolean => {
-    if (!activeHoldSaleId) return true;
-    if (holdPin.trim()) return true;
-    enqueueSnackbar("Enter hold order PIN to modify this order", { variant: "warning" });
-    return false;
-  };
 
   const handlePaymentSelect = (method: PosPaymentMethod) => {
     setPaymentMethod(method);
@@ -1040,23 +1440,79 @@ const PosSaleFormPage: React.FC = () => {
     }
   };
 
+  /**
+   * Save the cart as a quotation — a priced estimate for the customer.
+   *
+   * Nothing is paid and no stock moves (the server skips both for a
+   * quotation). It still goes through the below-cost check, because a
+   * quotation is a price the shop has promised.
+   */
+  const handleQuote = () => {
+    if (lines.length === 0) {
+      enqueueSnackbar("Add at least one item", { variant: "warning" });
+      return;
+    }
+    if (activeHoldSaleId) {
+      enqueueSnackbar("Finish or clear the held order before giving a quote.", {
+        variant: "warning",
+      });
+      return;
+    }
+    if (belowCostMessage) {
+      enqueueSnackbar(belowCostMessage, { variant: "error" });
+      return;
+    }
+
+    const payload = buildSalePayload("quotation");
+    // A quotation records no payment of any kind.
+    saveMutation.mutate({
+      ...payload,
+      payment_method: "Cash",
+      amount_received: null,
+      payment_splits: undefined,
+      cheque_number: null,
+      bank_name: null,
+    });
+  };
+
   const handleComplete = () => {
     if (lines.length === 0) {
       enqueueSnackbar("Add at least one item", { variant: "warning" });
       return;
     }
-    if (paymentMethod === "Cheque" && !chequeDetails) {
-      setChequeDialogOpen(true);
-      enqueueSnackbar("Enter cheque bank details", { variant: "warning" });
+    if (belowCostMessage) {
+      enqueueSnackbar(belowCostMessage, { variant: "error" });
       return;
     }
-    if (paymentMethod !== "Credit" && amountReceived < netAmount) {
-      enqueueSnackbar("Amount received is less than net amount", { variant: "warning" });
-      return;
-    }
-    if (paymentMethod === "Credit" && !form.customer_id) {
-      enqueueSnackbar("Select a customer for credit sales", { variant: "warning" });
-      return;
+    if (splitMode) {
+      const splitError = splitsValidationError(paymentSplits, netAmount);
+      if (splitError) {
+        enqueueSnackbar(splitError, { variant: "warning" });
+        return;
+      }
+      if (
+        paymentSplits.some((l) => l.method === "Credit" && Number(l.amount) > 0) &&
+        !form.customer_id
+      ) {
+        enqueueSnackbar("Select a customer for the credit part of the payment", {
+          variant: "warning",
+        });
+        return;
+      }
+    } else {
+      if (paymentMethod === "Cheque" && !chequeDetails) {
+        setChequeDialogOpen(true);
+        enqueueSnackbar("Enter cheque bank details", { variant: "warning" });
+        return;
+      }
+      if (paymentMethod !== "Credit" && amountReceived < netAmount) {
+        enqueueSnackbar("Amount received is less than net amount", { variant: "warning" });
+        return;
+      }
+      if (paymentMethod === "Credit" && !form.customer_id) {
+        enqueueSnackbar("Select a customer for credit sales", { variant: "warning" });
+        return;
+      }
     }
     if (offerNeedsPromo && !String(form.offer_promo_code ?? "").trim()) {
       enqueueSnackbar("Enter the promo code for this offer", { variant: "warning" });
@@ -1065,7 +1521,6 @@ const PosSaleFormPage: React.FC = () => {
 
     const payload = buildSalePayload("completed");
     if (activeHoldSaleId) {
-      if (!requireHoldPin()) return;
       completeHoldMutation.mutate({ id: activeHoldSaleId, payload });
       return;
     }
@@ -1084,7 +1539,6 @@ const PosSaleFormPage: React.FC = () => {
 
     const payload = buildSalePayload("hold");
     if (activeHoldSaleId) {
-      if (!requireHoldPin()) return;
       updateHoldMutation.mutate({ id: activeHoldSaleId, payload });
       return;
     }
@@ -1131,8 +1585,6 @@ const PosSaleFormPage: React.FC = () => {
     offerEngine,
     selectedOffer: selectedOffer ?? null,
     activeHoldSaleId,
-    holdPin,
-    setHoldPin,
     itemBranch,
     catalogScopeLabel,
     categories,
@@ -1175,6 +1627,8 @@ const PosSaleFormPage: React.FC = () => {
     handleCatalogSearchSubmit,
     setLineQty,
     setLineUnitPrice,
+    setLineDiscount,
+    allowItemDiscount,
     updateLineQty,
     handlePaymentSelect,
     handleComplete,
@@ -1184,15 +1638,120 @@ const PosSaleFormPage: React.FC = () => {
     savePosSelectedCustomer,
     customerDisplayName,
     goToCheckout,
+    autoPrintEnabled: hardwareSettings?.allow_auto_print ?? true,
+    handleQuote,
+    setReprintOpen,
+    setQuickAddCustomerOpen,
+    customerOpenSignal,
+    openCustomerPicker: () => setCustomerOpenSignal((n) => n + 1),
+    splitMode,
+    setSplitMode,
+    paymentSplits,
+    setPaymentSplits,
+    belowCostKeys: new Set(belowCostLines.map((l) => l.key)),
+    belowCostMessage,
+    unitCostFor: (itemId: number | null | undefined) =>
+      itemId == null ? 0 : Math.max(0, Number(itemCostById.get(itemId)?.purchase_price ?? 0)),
+    handleScannedCode,
+    scanResults,
+    selectScanItem,
+    pendingScanItem,
+    pendingScanQty,
+    setPendingScanQty,
+    pendingScanPrice,
+    setPendingScanPrice,
+    pendingScanDiscountType,
+    setPendingScanDiscountType,
+    pendingScanDiscountValue,
+    setPendingScanDiscountValue,
+    allowSaleBelowCost,
+    allowOrderDiscount: orderSettings?.allow_order_discount !== false,
+    commitPendingScanItem,
+    cancelPendingScan,
+    scanBusy,
+    scanRefocusToken,
+    scanInput,
+    setScanInput,
+    cameraScanOpen,
+    setCameraScanOpen,
   };
 
   return (
     <PosSaleContext.Provider value={session}>
-      {view === "products" ? <PosProductSelectPage /> : <PosSaleCheckoutPage />}
+      {view === "scan" ? (
+        <PosScanCheckoutPage />
+      ) : view === "products" ? (
+        <PosProductSelectPage />
+      ) : (
+        <PosSaleCheckoutPage />
+      )}
+      <PosReceiptPreviewDialog
+        receipt={receiptPreview}
+        autoPrint={hardwareSettings?.allow_auto_print ?? false}
+        onClose={() => {
+          setReceiptPreview(null);
+          setScanRefocusToken((t) => t + 1);
+        }}
+      />
+      <PosReprintDialog
+        open={reprintOpen}
+        onClose={() => {
+          setReprintOpen(false);
+          setScanRefocusToken((t) => t + 1);
+        }}
+        onSelect={(receipt) => {
+          setReprintOpen(false);
+          setReceiptPreview(receipt);
+        }}
+      />
+      <PosQuickAddCustomerDialog
+        open={quickAddCustomerOpen}
+        defaultRoute={itemBranch}
+        onClose={() => {
+          setQuickAddCustomerOpen(false);
+          setScanRefocusToken((t) => t + 1);
+        }}
+        onCreated={(customer) => {
+          setForm((prev) => ({
+            ...prev,
+            customer_id: customer.id,
+            customer_name: customerDisplayName(customer),
+          }));
+          savePosSelectedCustomer(customer);
+          enqueueSnackbar(`${customerDisplayName(customer)} added and selected`, {
+            variant: "success",
+          });
+        }}
+      />
+      <PosBarcodeMatchDialog
+        open={barcodeMatches.length > 0}
+        code={barcodeMatchCode}
+        matches={barcodeMatches}
+        onClose={() => {
+          setBarcodeMatches([]);
+          setScanRefocusToken((t) => t + 1);
+        }}
+        onPick={(item) => {
+          setBarcodeMatches([]);
+          selectScanItem(item);
+        }}
+      />
+      <CameraBarcodeScanDialog
+        open={cameraScanOpen}
+        onClose={() => {
+          setCameraScanOpen(false);
+          setScanRefocusToken((t) => t + 1);
+        }}
+        onDetected={(code) => {
+          setCameraScanOpen(false);
+          void handleScannedCode(code);
+        }}
+      />
       <PosChequeBankDialog
         open={chequeDialogOpen}
         onClose={() => setChequeDialogOpen(false)}
         initialBankName={chequeDetails?.bank_name}
+        initialChequeNumber={chequeDetails?.cheque_number}
         onConfirm={(d) => {
           setChequeDetails(d);
           setAmountReceived(netAmount);

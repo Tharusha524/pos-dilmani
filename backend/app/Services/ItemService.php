@@ -9,6 +9,7 @@ use App\Models\ItemCategory;
 use App\Models\ItemSubCategory;
 use App\Models\User;
 use Carbon\Carbon;
+use App\Support\LineDiscount;
 use App\Support\StorageUrl;
 use Exception;
 use Illuminate\Http\UploadedFile;
@@ -24,6 +25,7 @@ class ItemService
         private LocationService $locationService,
         private OrderTransactionService $orderTransactionService,
         private ItemExpirySyncService $itemExpirySyncService,
+        private BarcodeService $barcodeService,
     ) {
     }
 
@@ -134,13 +136,18 @@ class ItemService
             $query->where('description', 'like', $like);
         } elseif ($style === 'barcode_qty') {
             $query->where(function ($q) use ($like, $term) {
-                $q->where('sku', 'like', $like)
+                // Exact barcode first: a scanner sends the whole code, and a
+                // LIKE match on a short code could otherwise pull in a longer
+                // one that merely contains it.
+                $q->where('barcode', $term)
+                    ->orWhere('sku', 'like', $like)
                     ->orWhere('item_code', 'like', $like)
                     ->orWhere('item_number', 'like', $like);
             });
         } else {
             $query->where(function ($q) use ($like, $term) {
                 $q->where('item_number', 'like', $like)
+                    ->orWhere('barcode', $term)
                     ->orWhere('item_code', 'like', $like)
                     ->orWhere('sku', 'like', $like);
             });
@@ -163,6 +170,148 @@ class ItemService
             'search_style' => $style,
             'order_settings' => $this->orderTransactionService->getPosSettings($user),
         ];
+    }
+
+    /**
+     * Resolve a scanned or hand-typed code to the item being sold.
+     *
+     * Checked most-specific first — barcode, then SKU, then the supplier's
+     * code, then the item number — so a code that is a genuine barcode is
+     * never beaten by a loose match on another field.
+     *
+     * Unlike the POS search box, this NEVER guesses. When one code maps to
+     * several products (two shirts sharing a manufacturer code, say) it
+     * returns them all as `matches` for the cashier to choose from, because
+     * silently ringing up the wrong one is worse than asking.
+     *
+     * @return array{items: array<int, array<string, mixed>>, matched_field: ?string, ambiguous: bool}
+     */
+    public function lookupByBarcodeForUser(User $user, string $code, ?string $location = null): array
+    {
+        $code = $this->barcodeService->normalize($code);
+
+        if ($code === '') {
+            throw new Exception('No barcode provided.');
+        }
+
+        $settings = $this->orderTransactionService->getSettings($user);
+        $invSettings = $this->inventorySettingService->getForUser($user);
+        $company = $this->companySettingService->getCompanyForUser($user);
+        $costingMethod = $invSettings['costing_method'] ?? 'FIFO';
+
+        $base = Item::where('company_id', $company->id)
+            ->where('is_active', true);
+
+        if ($location && $location !== 'all') {
+            $base->where('location', $location);
+        }
+
+        if (!$settings['allow_ingredients_items_in_sales']) {
+            $base->where(function ($q) {
+                $q->whereNull('product_type')
+                    ->orWhere('product_type', 'not like', '%ingredient%')
+                    ->orWhere('product_type', 'not like', '%Ingredient%')
+                    ->orWhere('product_type', 'not like', '%manufacturing%');
+            });
+        }
+
+        $matchedField = null;
+        $items = collect();
+
+        foreach (['barcode', 'sku', 'item_code', 'supplier_item_code', 'item_number'] as $field) {
+            $found = (clone $base)->where($field, $code)->orderBy('item_number')->limit(25)->get();
+
+            if ($found->isNotEmpty()) {
+                $matchedField = $field;
+                $items = $found;
+                break;
+            }
+        }
+
+        if ($items->isEmpty()) {
+            throw new Exception("No item found for barcode \"{$code}\".");
+        }
+
+        // The same product has one row per branch. Those are the same shirt,
+        // not competing matches, so collapse them by item_number — otherwise a
+        // multi-branch shop would see a "pick one" prompt on every scan.
+        $distinctProducts = $items->groupBy('item_number');
+
+        $rows = $distinctProducts
+            ->map(fn ($group) => $this->formatItem($group->first(), $costingMethod))
+            ->values()
+            ->all();
+
+        $hideQty = (bool) $settings['hide_quantity_from_plu_on_sales_screen'];
+        if ($hideQty) {
+            $rows = array_map(function (array $row) {
+                unset($row['qty']);
+
+                return $row;
+            }, $rows);
+        }
+
+        return [
+            'items' => $rows,
+            'matched_field' => $matchedField,
+            'ambiguous' => count($rows) > 1,
+            'order_settings' => $this->orderTransactionService->getPosSettings($user),
+        ];
+    }
+
+    /**
+     * A fresh, unused barcode for this user's company.
+     *
+     * @return array{barcode: string, barcode_type: string}
+     */
+    public function generateBarcodeForUser(User $user): array
+    {
+        $company = $this->companySettingService->getCompanyForUser($user);
+
+        return [
+            'barcode' => $this->barcodeService->generateForCompany($company->id),
+            'barcode_type' => BarcodeService::TYPE_CODE128,
+        ];
+    }
+
+    /**
+     * Issue barcodes to items that have none, so a shop that already has a
+     * catalog can start printing labels without editing every item by hand.
+     *
+     * @return array{assigned: int, skipped: int}
+     */
+    public function backfillBarcodesForCompany(int $companyId): array
+    {
+        $assigned = 0;
+        $skipped = 0;
+
+        $groups = Item::where('company_id', $companyId)
+            ->orderBy('item_number')
+            ->get()
+            ->groupBy('item_number');
+
+        foreach ($groups as $itemNumber => $group) {
+            // Branch copies share one code, so decide per product, not per row.
+            $existing = $group->first(fn (Item $i) => !empty($i->barcode));
+
+            if ($existing !== null) {
+                $skipped += $group->count();
+                continue;
+            }
+
+            $barcode = $this->barcodeService->generateForCompany($companyId);
+
+            Item::where('company_id', $companyId)
+                ->where('item_number', $itemNumber)
+                ->update([
+                    'barcode' => $barcode,
+                    'barcode_type' => BarcodeService::TYPE_CODE128,
+                ]);
+
+            $assigned += $group->count();
+        }
+
+        return ['assigned' => $assigned, 'skipped' => $skipped];
     }
 
     public function updatePurchasePriceForUser(User $user, int $id, float $purchasePrice): array
@@ -352,12 +501,15 @@ class ItemService
                 'company_id' => $company->id,
                 'item_number' => $itemNumber,
                 'description' => $description,
+                'barcode' => $this->resolveBarcodeForCreate($company->id, $itemNumber, $data),
             ]
         ));
 
         if (array_key_exists('packets_per_bundle', $data)) {
             $this->syncPacketsPerBundleAcrossLocations($item);
         }
+
+        $this->syncBarcodeAcrossLocations($item);
 
         return $this->formatItem($item);
     }
@@ -411,11 +563,15 @@ class ItemService
             }
         }
 
+        $this->applyBarcodeOnUpdate($item, $data);
+
         $item->save();
 
         if (array_key_exists('packets_per_bundle', $data)) {
             $this->syncPacketsPerBundleAcrossLocations($item);
         }
+
+        $this->syncBarcodeAcrossLocations($item);
 
         return $this->formatItem($item->fresh());
     }
@@ -437,6 +593,121 @@ class ItemService
             ->where('item_number', $item->item_number)
             ->where('id', '!=', $item->id)
             ->update(['packets_per_bundle' => $item->packets_per_bundle]);
+    }
+
+    /**
+     * The barcode a newly created item should carry.
+     *
+     * A branch's copy of an existing product (same item_number, different
+     * location) inherits that product's barcode instead of being issued a new
+     * one — the shirt is the same shirt, and the label already printed for it
+     * has to keep scanning at every branch.
+     */
+    private function resolveBarcodeForCreate(int $companyId, string $itemNumber, array $data): ?string
+    {
+        $existing = Item::where('company_id', $companyId)
+            ->where('item_number', $itemNumber)
+            ->whereNotNull('barcode')
+            ->value('barcode');
+
+        if (is_string($existing) && $existing !== '') {
+            return $existing;
+        }
+
+        $provided = $this->barcodeService->normalize($data['barcode'] ?? null);
+
+        if ($provided !== '') {
+            $this->assertBarcodeUsable($companyId, $provided, $itemNumber, $data['barcode_type'] ?? null);
+
+            return $provided;
+        }
+
+        // No code typed in: generate one unless the user explicitly opted out,
+        // so items never reach the label queue with nothing to print.
+        if ((bool) ($data['auto_generate_barcode'] ?? true)) {
+            return $this->barcodeService->generateForCompany($companyId);
+        }
+
+        return null;
+    }
+
+    /**
+     * Apply a barcode change coming from an item edit.
+     *
+     * Clearing the field on an auto-generating item re-issues a code rather
+     * than leaving the item unlabelled, which mirrors how blanking
+     * item_number re-runs its auto-numbering.
+     */
+    private function applyBarcodeOnUpdate(Item $item, array $data): void
+    {
+        if (!array_key_exists('barcode', $data) && !array_key_exists('auto_generate_barcode', $data)) {
+            return;
+        }
+
+        $companyId = (int) $item->company_id;
+        $autoGenerate = array_key_exists('auto_generate_barcode', $data)
+            ? (bool) $data['auto_generate_barcode']
+            : (bool) ($item->auto_generate_barcode ?? true);
+
+        $barcode = array_key_exists('barcode', $data)
+            ? $this->barcodeService->normalize($data['barcode'])
+            : $this->barcodeService->normalize($item->barcode);
+
+        if ($barcode === '') {
+            $item->barcode = $autoGenerate
+                ? $this->barcodeService->generateForCompany($companyId)
+                : null;
+
+            return;
+        }
+
+        $this->assertBarcodeUsable(
+            $companyId,
+            $barcode,
+            (string) $item->item_number,
+            $data['barcode_type'] ?? $item->barcode_type
+        );
+
+        $item->barcode = $barcode;
+    }
+
+    /**
+     * A barcode identifies one product, so it must scan to exactly one. Two
+     * different products sharing a code would make every scan of it ambiguous
+     * at the till, so it is rejected at the point of entry rather than being
+     * discovered by a cashier mid-sale.
+     */
+    private function assertBarcodeUsable(
+        int $companyId,
+        string $barcode,
+        string $itemNumber,
+        ?string $barcodeType
+    ): void {
+        $error = $this->barcodeService->validateForType($barcode, (string) $barcodeType);
+        if ($error !== null) {
+            throw new Exception($error);
+        }
+
+        if ($this->barcodeService->isTakenByAnotherItem($companyId, $barcode, $itemNumber)) {
+            throw new Exception("Barcode \"{$barcode}\" is already used by another item.");
+        }
+    }
+
+    /**
+     * Keeps every branch's copy of an item on one barcode, for the same reason
+     * packets-per-bundle is synced: it describes the physical product, not the
+     * branch's row, and a printed label must scan identically everywhere.
+     */
+    private function syncBarcodeAcrossLocations(Item $item): void
+    {
+        Item::where('company_id', $item->company_id)
+            ->where('item_number', $item->item_number)
+            ->where('id', '!=', $item->id)
+            ->update([
+                'barcode' => $item->barcode,
+                'barcode_type' => $item->barcode_type,
+                'auto_generate_barcode' => $item->auto_generate_barcode,
+            ]);
     }
 
     public function getCategoriesForUser(User $user, ?string $location = null)
@@ -790,6 +1061,7 @@ class ItemService
                 ? $discountType
                 : 'percent',
             'max_discount' => (float) ($data['max_discount'] ?? 0),
+            'max_discount_type' => LineDiscount::normalizeType($data['max_discount_type'] ?? null),
             'has_multiple_options' => (bool) ($data['has_multiple_options'] ?? false),
             'item_details' => $data['item_details'] ?? null,
             'track_with_inventory' => (bool) ($data['track_with_inventory'] ?? true),
@@ -803,6 +1075,8 @@ class ItemService
             'item_code' => $data['item_code'] ?? null,
             'supplier_item_code' => $data['supplier_item_code'] ?? null,
             'sku' => $data['sku'] ?? null,
+            'barcode_type' => $this->barcodeService->normalizeType($data['barcode_type'] ?? null),
+            'auto_generate_barcode' => (bool) ($data['auto_generate_barcode'] ?? true),
             'is_favourite' => (bool) ($data['is_favourite'] ?? false),
             'is_active' => (bool) ($data['is_active'] ?? true),
         ];
@@ -866,6 +1140,7 @@ class ItemService
             'default_discount' => (float) ($item->default_discount ?? 0),
             'default_discount_type' => $item->default_discount_type ?? 'percent',
             'max_discount' => (float) ($item->max_discount ?? 0),
+            'max_discount_type' => LineDiscount::normalizeType($item->max_discount_type ?? null),
             'has_multiple_options' => (bool) ($item->has_multiple_options ?? false),
             'item_details' => $item->item_details,
             'track_with_inventory' => (bool) ($item->track_with_inventory ?? true),
@@ -887,6 +1162,9 @@ class ItemService
             'item_code' => $item->item_code,
             'supplier_item_code' => $item->supplier_item_code,
             'sku' => $item->sku,
+            'barcode' => $item->barcode,
+            'barcode_type' => $this->barcodeService->normalizeType($item->barcode_type),
+            'auto_generate_barcode' => (bool) ($item->auto_generate_barcode ?? true),
             'is_favourite' => (bool) ($item->is_favourite ?? false),
             'is_active' => (bool) $item->is_active,
             'status' => $item->is_active ? 'Active' : 'Inactive',

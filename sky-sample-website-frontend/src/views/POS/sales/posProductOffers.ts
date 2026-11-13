@@ -39,6 +39,8 @@ export interface CartOfferLine {
   qty: number;
   unit_price: number;
   line_total?: number;
+  discount_type?: "percent" | "amount" | null;
+  discount_value?: number | null;
 }
 
 /** True when a single cart line qualifies for this product offer. */

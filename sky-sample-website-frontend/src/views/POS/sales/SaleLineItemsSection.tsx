@@ -25,6 +25,7 @@ import { getItems, type Item } from "../../../api/itemsApi";
 import type { SaleLineItem } from "../../../api/salesApi";
 import { SaleSection, fieldSx } from "./SaleFormComponents";
 import { formatSaleRs } from "./saleFormUtils";
+import { priceLine } from "./posLineDiscount";
 
 export type SaleLineDraft = SaleLineItem & {
   key: string;
@@ -160,7 +161,9 @@ const SaleLineItemsSection: React.FC<SaleLineItemsSectionProps> = ({
           qty = next.max_return_qty;
         }
         const unitPrice = Math.max(0, Number(next.unit_price) || 0);
-        return { ...next, qty, unit_price: unitPrice, line_total: roundLine(qty * unitPrice) };
+        // Keeps a discounted line's discount when its quantity or price is
+        // edited here, matching how the server will re-price it on save.
+        return priceLine({ ...next, qty, unit_price: unitPrice });
       })
     );
   };

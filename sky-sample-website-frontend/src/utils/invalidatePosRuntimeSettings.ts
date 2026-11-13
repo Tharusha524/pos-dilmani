@@ -8,6 +8,7 @@ export function invalidatePosRuntimeSettings(queryClient: QueryClient): void {
     "order-settings",
     "item-settings",
     "hardware-settings",
+    "receipt-settings",
     "tax-settings",
     "inventory-settings",
     "items",

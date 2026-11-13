@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from "react-router";
 import InventoryDashboard from "./inventory/InventoryDashboard";
 import InventorySettingsPage from "./inventory/InventorySettingsPage";
 import StockTransferPage from "./inventory/StockTransferPage";
+import BarcodeLabelsPage from "./inventory/labels/BarcodeLabelsPage";
 
 /** Inventory section router */
 const Inventory: React.FC = () => (
@@ -10,6 +11,7 @@ const Inventory: React.FC = () => (
     <Route index element={<InventoryDashboard />} />
     <Route path="settings" element={<InventorySettingsPage />} />
     <Route path="transfer" element={<StockTransferPage />} />
+    <Route path="barcode-labels" element={<BarcodeLabelsPage />} />
     <Route path="items" element={<Navigate to="/items" replace />} />
     <Route path="categories" element={<Navigate to="/items/categories" replace />} />
     <Route path="*" element={<Navigate to="/inventory" replace />} />

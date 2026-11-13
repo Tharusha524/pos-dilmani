@@ -38,12 +38,10 @@ const PosSalesTypeToggle: React.FC<PosSalesTypeToggleProps> = ({
           if (next) onChange(next);
         }}
         sx={{
-          bgcolor:
-            value === "Wholesale"
-              ? "#e8f5e9"
-              : value === "Retail"
-                ? "#e3f2fd"
-                : "#f0f4f8",
+          // Theme tokens, not fixed light-mode tints: this toggle sits in the
+          // POS header, which is dark in dark mode, where the old pale blue
+          // and green backgrounds washed out.
+          bgcolor: "action.hover",
           borderRadius: 1,
           "& .MuiToggleButton-root": {
             textTransform: "none",
@@ -51,17 +49,22 @@ const PosSalesTypeToggle: React.FC<PosSalesTypeToggleProps> = ({
             fontSize: "0.75rem",
             px: 1.5,
             py: 0.35,
-            border: "1px solid #cfd8e3",
-            color: "#444",
+            borderColor: "divider",
+            color: "text.secondary",
+            // Solid orange on white for the active mode. Which price list is
+            // in use changes what every customer is charged, so it is worth
+            // being the loudest thing in the header rather than a soft tint.
             "&.Mui-selected": {
-              bgcolor:
-                value === "Wholesale"
-                  ? "#c8e6c9"
-                  : "#bbdefb",
-              color: value === "Wholesale" ? "#1b5e20" : "#0d47a1",
-              borderColor: value === "Wholesale" ? "#81c784" : "#64b5f6",
+              bgcolor: "#ed6c02",
+              color: "#ffffff",
+              borderColor: "#e65100",
               "&:hover": {
-                bgcolor: value === "Wholesale" ? "#a5d6a7" : "#90caf9",
+                bgcolor: "#e65100",
+              },
+              // MUI drops the border between adjacent selected/unselected
+              // buttons, which leaves the orange block looking clipped.
+              "& + .MuiToggleButton-root": {
+                borderLeftColor: "#e65100",
               },
             },
           },

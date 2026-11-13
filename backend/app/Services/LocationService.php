@@ -143,6 +143,9 @@ class LocationService
             'default_discount',
             'default_discount_type',
             'max_discount',
+            // Copied with its number: a branch copy that took the amount but
+            // not the unit would turn a Rs ceiling into a percent one.
+            'max_discount_type',
             'uom',
             'packets_per_bundle',
             'item_code',

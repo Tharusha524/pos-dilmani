@@ -8,6 +8,8 @@ const Sales: React.FC = () => (
   <Routes>
     <Route index element={<SalesDashboard />} />
     <Route path="new" element={<PosSaleFormPage />} />
+    {/* Scan-first cashier lane. Same session as /sales/new, different door. */}
+    <Route path="checkout" element={<PosSaleFormPage initialView="scan" />} />
     <Route path=":id/edit" element={<SaleFormPage />} />
     <Route path="*" element={<Navigate to="/sales" replace />} />
   </Routes>

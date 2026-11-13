@@ -51,8 +51,6 @@ const PosHoldOrdersPanel: React.FC<PosHoldOrdersPanelProps> = ({
 }) => {
   const [expanded, setExpanded] = useState(true);
   const [openHoldId, setOpenHoldId] = useState<number | null>(null);
-  const [pinDialogOpen, setPinDialogOpen] = useState(false);
-  const [pinInput, setPinInput] = useState("");
   const [pendingDelete, setPendingDelete] = useState<Sale | null>(null);
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
@@ -79,20 +77,13 @@ const PosHoldOrdersPanel: React.FC<PosHoldOrdersPanelProps> = ({
     },
   });
 
-  const closePinDialog = () => {
-    setPinDialogOpen(false);
-    setPinInput("");
-    setPendingDelete(null);
-  };
+  const closePinDialog = () => setPendingDelete(null);
 
-  const requestDelete = (sale: Sale) => {
-    setPendingDelete(sale);
-    setPinDialogOpen(true);
-  };
+  const requestDelete = (sale: Sale) => setPendingDelete(sale);
 
   const confirmDelete = () => {
-    if (!pendingDelete || !pinInput.trim()) return;
-    deleteMutation.mutate({ id: pendingDelete.id, pin: pinInput.trim() });
+    if (!pendingDelete) return;
+    deleteMutation.mutate({ id: pendingDelete.id });
   };
 
   return (
@@ -277,27 +268,17 @@ const PosHoldOrdersPanel: React.FC<PosHoldOrdersPanelProps> = ({
       </Box>
 
       <Dialog
-        open={pinDialogOpen}
+        open={pendingDelete !== null}
         onClose={closePinDialog}
         maxWidth="xs"
         fullWidth
         sx={CATEGORY_DIALOG_PAPER_SX}
       >
-        <DialogTitle sx={{ fontWeight: 700 }}>Hold order PIN</DialogTitle>
+        <DialogTitle sx={{ fontWeight: 700 }}>Delete hold order?</DialogTitle>
         <DialogContent>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            Enter PIN to delete hold order {pendingDelete?.sales_id ?? ""}.
+          <Typography variant="body2" color="text.secondary">
+            Delete hold order {pendingDelete?.sales_id ?? ""}? This cannot be undone.
           </Typography>
-          <TextField
-            fullWidth
-            size="small"
-            label="PIN"
-            type="password"
-            value={pinInput}
-            onChange={(e) => setPinInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && confirmDelete()}
-            autoFocus
-          />
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
           <Button onClick={closePinDialog} sx={{ textTransform: "none" }}>
@@ -307,7 +288,7 @@ const PosHoldOrdersPanel: React.FC<PosHoldOrdersPanelProps> = ({
             variant="contained"
             color="error"
             onClick={confirmDelete}
-            disabled={!pinInput.trim() || deleteMutation.isPending}
+            disabled={deleteMutation.isPending}
             sx={{ textTransform: "none" }}
           >
             Delete
