@@ -246,6 +246,8 @@ class LocationService
             $deduct = (float) $line['qty'];
             if (!empty($line['item_batch_id'])) {
                 $this->deductFromSpecificBatch($item, (int) $line['item_batch_id'], $deduct, $allowNegativeInventory);
+            } elseif (!empty($line['main_stock_only'])) {
+                $this->deductFromMainStock($item, $deduct, $allowNegativeInventory);
             } else {
                 $this->deductStockFefo($item, $deduct, $allowNegativeInventory);
             }
@@ -299,6 +301,38 @@ class LocationService
         $item->save();
 
         $this->syncItemExpiryFromBatches($item->fresh());
+    }
+
+    /**
+     * Sell only the unbatched (main) stock. Used when the cashier picked
+     * "Main stock" in the batch popup, so the sale must not take from a batch.
+     */
+    private function deductFromMainStock(Item $item, float $qtyToDeduct, bool $allowNegative = false): void
+    {
+        if ($qtyToDeduct <= 0) {
+            return;
+        }
+
+        $current = (float) ($item->qty ?? 0);
+        $batchTotal = (float) ItemBatch::query()
+            ->where('item_id', $item->id)
+            ->where('location', $item->location)
+            ->where('qty', '>', 0)
+            ->lockForUpdate()
+            ->sum('qty');
+        $mainQty = round(max(0, $current - $batchTotal), 2);
+
+        if (!$allowNegative && $mainQty < $qtyToDeduct) {
+            throw new Exception(
+                "Insufficient main stock for {$item->item_number} at {$item->location}. "
+                ."Available: {$mainQty}, required: {$qtyToDeduct}. Pick a batch for the rest."
+            );
+        }
+
+        $item->qty = $allowNegative
+            ? round($current - $qtyToDeduct, 2)
+            : round(max(0, $current - $qtyToDeduct), 2);
+        $item->save();
     }
 
     private function restoreStockToBatch(Item $item, int $batchId, float $qtyToRestore): void

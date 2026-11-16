@@ -73,5 +73,9 @@ export function maxQtyForCartLine(
       .reduce((sum, l) => sum + l.qty, 0);
     return Math.max(0, line.batch_stock_qty - usedByOtherLines);
   }
+  // "Main stock" picked in the scan popup: capped at the unbatched qty.
+  if (line.main_stock_only && line.batch_stock_qty != null) {
+    return Math.max(0, line.batch_stock_qty);
+  }
   return itemTotalStock;
 }

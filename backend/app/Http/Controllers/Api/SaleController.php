@@ -357,6 +357,9 @@ class SaleController extends Controller
             'items.*.imei_serial' => 'nullable|string|max:100',
             'items.*.batch_id' => 'nullable|string|max:100',
             'items.*.item_batch_id' => 'nullable|integer|exists:item_batches,id',
+            // Cashier picked "Main stock" in the batch popup: sell only the
+            // unbatched qty, never spill into a batch.
+            'items.*.main_stock_only' => 'nullable|boolean',
             'items.*.secondary_uom' => 'nullable|string|max:50',
             'items.*.secondary_uom_qty' => 'nullable|numeric|min:0',
             'items.*.additional_details' => 'nullable|string|max:2000',

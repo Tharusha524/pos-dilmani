@@ -401,6 +401,8 @@ class OrderTransactionService
             }
             if (isset($row['item_batch_id']) && $row['item_batch_id'] !== '' && $row['item_batch_id'] !== null) {
                 $line['item_batch_id'] = (int) $row['item_batch_id'];
+            } elseif (!empty($row['main_stock_only'])) {
+                $line['main_stock_only'] = true;
             }
             if ($settings['allow_multiple_uom_for_sales_order']) {
                 $line['secondary_uom'] = trim((string) ($row['secondary_uom'] ?? '')) ?: null;

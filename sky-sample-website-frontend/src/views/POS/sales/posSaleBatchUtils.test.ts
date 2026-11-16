@@ -69,4 +69,9 @@ describe("posSaleBatchUtils", () => {
     expect(maxQtyForCartLine(lines[1], lines, 100)).toBe(6);
     expect(maxQtyForCartLine({ key: "c", qty: 1 } as never, [], 50)).toBe(50);
   });
+
+  test("maxQtyForCartLine caps a main-stock pick at the unbatched qty", () => {
+    const line = { key: "m", qty: 1, main_stock_only: true, batch_stock_qty: 10 } as never;
+    expect(maxQtyForCartLine(line, [line], 15)).toBe(10);
+  });
 });

@@ -31,6 +31,8 @@ export interface SaleLineItem {
   imei_serial?: string | null;
   batch_id?: string | null;
   item_batch_id?: number | null;
+  /** Cashier picked "Main stock" at the till: sell only unbatched stock. */
+  main_stock_only?: boolean | null;
   secondary_uom?: string | null;
   secondary_uom_qty?: number | null;
   additional_details?: string | null;

@@ -50,9 +50,11 @@ import { useBranchLocations } from "../../../hooks/useBranchLocations";
 import { downloadSaleReceiptImageFromApi } from "./saleReceiptImageDownload";
 import PosChequeBankDialog, { type ChequePaymentDetails } from "./PosChequeBankDialog";
 import PosSaleBatchSelectDialog from "./PosSaleBatchSelectDialog";
+import PosScanBatchPickDialog, { type ScanStockOption } from "./PosScanBatchPickDialog";
 import {
   availableBatchesAtBranch,
   maxQtyForCartLine,
+  normalizeBranchLocation,
   unitPriceForBatchSale,
 } from "./posSaleBatchUtils";
 import type { PosPaymentMethod } from "./posSaleConstants";
@@ -114,6 +116,22 @@ import {
   type PosCategoryTab,
 } from "./posSaleCatalogFilter";
 import type { PosSubCategoryTab } from "./PosSubCategoryTabs";
+
+/**
+ * Price/discount the cashier changed on the scan entry row. Each field is set
+ * only when it differs from the default, so an untouched row leaves the line
+ * at the picked batch's own price.
+ */
+interface ScanLineOverrides {
+  unitPrice?: number;
+  discount?: { type: "percent" | "amount"; value: number };
+}
+
+/** Main stock is dated by the item's own expiry (expired main stock is moved into a batch). */
+function isMainStockExpired(item: Item): boolean {
+  if (!item.expiry_date) return false;
+  return item.expiry_date.slice(0, 10) < new Date().toISOString().slice(0, 10);
+}
 
 function newLineKey(): string {
   return `line-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -188,6 +206,14 @@ const PosSaleFormPage: React.FC<PosSaleFormPageProps> = ({
   const [batchDialogBatches, setBatchDialogBatches] = useState<ItemBatch[]>([]);
   const [batchDialogVariants, setBatchDialogVariants] = useState<Item[]>([]);
   const [batchDialogLoading, setBatchDialogLoading] = useState(false);
+  // Scan popup: which stock (main or a batch) the scanned item is sold from.
+  const [stockPick, setStockPick] = useState<{
+    saleItem: Item;
+    qty: number;
+    overrides: ScanLineOverrides | null;
+  } | null>(null);
+  const [stockPickOptions, setStockPickOptions] = useState<ScanStockOption[]>([]);
+  const [stockPickLoading, setStockPickLoading] = useState(false);
   const [offerDiscount, setOfferDiscount] = useState(0);
   const [offerPreview, setOfferPreview] = useState<OfferPreviewResult | null>(null);
   const [activeHoldSaleId, setActiveHoldSaleId] = useState<number | null>(null);
@@ -607,24 +633,29 @@ const PosSaleFormPage: React.FC<PosSaleFormPageProps> = ({
   const addItemToCartDirect = (
     saleItem: Item,
     addQty: number,
-    batch: ItemBatch | null
-  ) => {
+    batch: ItemBatch | null,
+    /** Set when "Main stock" was picked: the unbatched qty, which caps the line. */
+    mainOnlyQty?: number
+  ): boolean => {
+    const mainOnly = !batch && mainOnlyQty != null;
     if (batch && isBatchExpired(batch)) {
       enqueueSnackbar(`Batch ${batch.batch_number} is expired and cannot be sold.`, {
         variant: "error",
       });
-      return;
+      return false;
     }
-    if (!batch && isItemExpired(saleItem)) {
+    if (!batch && (mainOnly ? isMainStockExpired(saleItem) : isItemExpired(saleItem))) {
       enqueueSnackbar(`${saleItem.item_number} is expired. Write off from Inventory.`, {
         variant: "error",
       });
-      return;
+      return false;
     }
     const availableQty =
       batch != null
         ? batch.qty
-        : availableStockForCartItem(saleItem);
+        : mainOnly
+          ? mainOnlyQty
+          : availableStockForCartItem(saleItem);
     const qtyToAdd = roundSaleQty(addQty);
     const batchId = batch?.id ?? null;
 
@@ -636,7 +667,7 @@ const PosSaleFormPage: React.FC<PosSaleFormPageProps> = ({
       enqueueSnackbar("This item is out of stock at all branches.", {
         variant: "warning",
       });
-      return;
+      return false;
     }
 
     const existing = lines.find(
@@ -648,26 +679,37 @@ const PosSaleFormPage: React.FC<PosSaleFormPageProps> = ({
     if (!canSetCartQty(saleItem, nextQty, availableQty, allowNegativeInventory)) {
       const scope = batch
         ? `in batch ${batch.batch_number}`
-        : `at ${saleItem.location}`;
+        : mainOnly
+          ? "in main stock"
+          : `at ${saleItem.location}`;
       enqueueSnackbar(
         `Only ${Math.max(0, availableQty).toFixed(2)} ${formatUomLabel(saleItem.uom)} available ${scope}.`,
         { variant: "warning" }
       );
-      return;
+      return false;
     }
+    // A main-stock pick marks the line so the server sells it only from
+    // unbatched stock, and remembers the unbatched qty as the line's cap.
+    const mainOnlyFields = mainOnly
+      ? { main_stock_only: true, batch_stock_qty: mainOnlyQty }
+      : {};
     if (existing) {
       setLines((prev) =>
         prev.map((l) => {
           if (l.key !== existing.key) return l;
-          return priceLine({ ...l, qty: roundSaleQty(l.qty + qtyToAdd) });
+          return priceLine({ ...l, ...mainOnlyFields, qty: roundSaleQty(l.qty + qtyToAdd) });
         })
       );
     } else {
       setLines((prev) => [
         ...prev,
-        itemToLine(saleItem, salesPriceMode, qtyToAdd, batch, allowItemDiscount),
+        {
+          ...itemToLine(saleItem, salesPriceMode, qtyToAdd, batch, allowItemDiscount),
+          ...mainOnlyFields,
+        },
       ]);
     }
+    return true;
   };
 
   const addBatchesToCart = (
@@ -756,12 +798,145 @@ const PosSaleFormPage: React.FC<PosSaleFormPageProps> = ({
     );
   };
 
-  const addMainItemToCart = (displayItem: Item, addQty = 1) => {
+  /** Apply the scan row's changed price/discount to the line the item landed on. */
+  const applyScanOverrides = (
+    itemNumber: string,
+    batchId: number | null,
+    overrides: ScanLineOverrides | null | undefined
+  ) => {
+    if (!overrides || (overrides.unitPrice == null && !overrides.discount)) return;
+    setLines((prev) =>
+      prev.map((l) => {
+        if (l.item_number !== itemNumber || (l.item_batch_id ?? null) !== batchId) return l;
+        const discount = overrides.discount;
+        return priceLine({
+          ...l,
+          ...(overrides.unitPrice != null ? { unit_price: overrides.unitPrice } : {}),
+          ...(discount
+            ? {
+                discount_type: discount.value > 0 ? discount.type : null,
+                discount_value: discount.value,
+              }
+            : {}),
+        });
+      })
+    );
+  };
+
+  /** The cashier picked a stock in the scan popup: add the item from it. */
+  const addFromStockOption = (
+    saleItem: Item,
+    qty: number,
+    option: ScanStockOption,
+    overrides: ScanLineOverrides | null
+  ) => {
+    const added =
+      option.kind === "batch"
+        ? addItemToCartDirect(saleItem, qty, option.batch)
+        : addItemToCartDirect(saleItem, qty, null, option.qty);
+    if (added) {
+      applyScanOverrides(
+        saleItem.item_number,
+        option.kind === "batch" ? option.batch.id : null,
+        overrides
+      );
+    }
+  };
+
+  const closeStockPick = () => {
+    setStockPick(null);
+    setStockPickOptions([]);
+    setScanRefocusToken((t) => t + 1);
+  };
+
+  /**
+   * Item held in main stock and batches: ask which one is sold. With a single
+   * sellable stock it is used straight away, so the popup only appears when
+   * there is a real choice to make.
+   */
+  const startStockPick = (
+    saleItem: Item,
+    qty: number,
+    overrides: ScanLineOverrides | null
+  ) => {
+    setStockPick({ saleItem, qty, overrides });
+    setStockPickOptions([]);
+    setStockPickLoading(true);
+
+    void (async () => {
+      try {
+        const breakdown = await getItemInventoryBreakdown(saleItem.id);
+        const fresh = breakdown.item ?? saleItem;
+        const branch = normalizeBranchLocation(saleItem.location);
+        // Every batch at this branch counts against main stock, expired or not:
+        // main stock is whatever is not in a batch.
+        const branchBatches = breakdown.batches.filter(
+          (b) =>
+            (b.item_id == null || b.item_id === saleItem.id) &&
+            normalizeBranchLocation(b.location ?? branch) === branch &&
+            b.qty > 0
+        );
+        const batchTotal = branchBatches.reduce((sum, b) => sum + b.qty, 0);
+        const mainQty = Math.round(Math.max(0, Number(fresh.qty ?? 0) - batchTotal) * 100) / 100;
+
+        const options: ScanStockOption[] = [];
+        if (mainQty > 0 && !isMainStockExpired(fresh)) {
+          options.push({
+            kind: "main",
+            qty: mainQty,
+            unitPrice: unitPriceForBatchSale(saleItem, salesPriceMode, null),
+            expiryDate: fresh.expiry_date ?? null,
+          });
+        }
+        for (const batch of availableBatchesAtBranch(branchBatches, branch)) {
+          options.push({
+            kind: "batch",
+            batch,
+            qty: batch.qty,
+            unitPrice: unitPriceForBatchSale(saleItem, salesPriceMode, batch),
+            expiryDate: batch.expiry_date,
+          });
+        }
+
+        if (options.length <= 1) {
+          setStockPick(null);
+          setStockPickOptions([]);
+          if (options.length === 1) {
+            addFromStockOption(saleItem, qty, options[0], overrides);
+          } else {
+            // Nothing sellable: the normal path gives the right message
+            // (out of stock / expired) or allows a negative sale.
+            if (addItemToCartDirect(saleItem, qty, null)) {
+              applyScanOverrides(saleItem.item_number, null, overrides);
+            }
+          }
+          setScanRefocusToken((t) => t + 1);
+          return;
+        }
+        setStockPickOptions(options);
+      } catch (err) {
+        enqueueSnackbar(getFriendlyErrorMessage(err), { variant: "error" });
+        closeStockPick();
+      } finally {
+        setStockPickLoading(false);
+      }
+    })();
+  };
+
+  const addMainItemToCart = (
+    displayItem: Item,
+    addQty = 1,
+    overrides: ScanLineOverrides | null = null
+  ) => {
     const saleItem = resolveCartItemForSale(
       displayItem,
       variantsByItemNumber,
       itemBranch
     );
+    if (allowBatchPicker && saleItem.has_batches && isInventoryTrackedItem(saleItem)) {
+      startStockPick(saleItem, roundSaleQty(addQty), overrides);
+      return;
+    }
     if (saleItem.has_expired_stock || isItemExpired(saleItem)) {
       if (saleItem.has_batches) {
         enqueueSnackbar(
@@ -779,10 +954,12 @@ const PosSaleFormPage: React.FC<PosSaleFormPageProps> = ({
       );
       return;
     }
-    addItemToCartDirect(saleItem, roundSaleQty(addQty), null);
+    if (addItemToCartDirect(saleItem, roundSaleQty(addQty), null)) {
+      applyScanOverrides(saleItem.item_number, null, overrides);
+    }
   };
 
-  const openBatchPicker = (displayItem: Item, addQty = 1) => {
+  const openBatchPicker =(displayItem: Item, addQty = 1) => {
     const saleItem = resolveCartItemForSale(
       displayItem,
       variantsByItemNumber,
@@ -978,31 +1155,23 @@ const PosSaleFormPage: React.FC<PosSaleFormPageProps> = ({
       }
     }
 
-    addItemToCart(pendingScanItem, addQty);
-
-    // Applied after the add, to the main (unbatched) line for this product.
-    // Matched by item_number because the line may carry the sale branch's
-    // copy of the item, whose id differs from the one that was scanned.
-    const itemNumber = pendingScanItem.item_number;
+    // Only what the cashier actually changed is carried over, and applied to
+    // the line the item lands on — which may be a batch picked in the popup.
     const defaultDiscount = defaultDiscountForItem(pendingScanItem, allowItemDiscount);
     const discountChanged =
       discountValue !== (defaultDiscount?.discount_value ?? 0) ||
       (discountValue > 0 && pendingScanDiscountType !== (defaultDiscount?.discount_type ?? "percent"));
+    const overrides: ScanLineOverrides | null =
+      priceChanged || discountChanged
+        ? {
+            ...(priceChanged ? { unitPrice } : {}),
+            ...(discountChanged
+              ? { discount: { type: pendingScanDiscountType, value: discountValue } }
+              : {}),
+          }
+        : null;
 
-    if (priceChanged || discountChanged) {
-      setLines((prev) =>
-        prev.map((l) =>
-          l.item_number === itemNumber && l.item_batch_id == null
-            ? priceLine({
-                ...l,
-                unit_price: unitPrice,
-                discount_type: discountValue > 0 ? pendingScanDiscountType : null,
-                discount_value: discountValue,
-              })
-            : l
-        )
-      );
-    }
+    addItemToCart(pendingScanItem, addQty, overrides);
 
     setPendingScanItem(null);
     setPendingScanQty("1");
@@ -1756,6 +1925,21 @@ const PosSaleFormPage: React.FC<PosSaleFormPageProps> = ({
           setChequeDetails(d);
           setAmountReceived(netAmount);
         }}
+      />
+      <PosScanBatchPickDialog
+        open={stockPick != null}
+        item={stockPick?.saleItem ?? null}
+        options={stockPickOptions}
+        loading={stockPickLoading}
+        saleQty={stockPick?.qty ?? 1}
+        allowNegativeInventory={allowNegativeInventory}
+        onPick={(option) => {
+          if (stockPick) {
+            addFromStockOption(stockPick.saleItem, stockPick.qty, option, stockPick.overrides);
+          }
+          closeStockPick();
+        }}
+        onClose={closeStockPick}
       />
       <PosSaleBatchSelectDialog
         open={batchDialogOpen}
