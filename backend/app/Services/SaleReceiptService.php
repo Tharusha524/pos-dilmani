@@ -172,6 +172,7 @@ class SaleReceiptService
                 'allow_auto_print' => (bool) $hardware['allow_auto_print'],
                 'allow_dual_language_print' => (bool) $hardware['allow_dual_language_print'],
                 'logo_url' => $this->resolveLogoUrl($hardware),
+                'logo_data_uri' => $this->resolveLogoDataUri($hardware),
                 'allow_logo_on_sales_receipt' => (bool) $hardware['allow_logo_on_sales_receipt'],
             ],
             'labels' => $labels,
@@ -199,6 +200,7 @@ class SaleReceiptService
                     'tax_id' => $companyHeader['tax_id'] ?? null,
                     'registration_number' => $companyHeader['registration_number'] ?? null,
                     'logo_url' => null,
+                    'logo_data_uri' => null,
                     'source' => 'custom',
                 ];
             }
@@ -213,6 +215,7 @@ class SaleReceiptService
                 'tax_id' => null,
                 'registration_number' => null,
                 'logo_url' => null,
+                'logo_data_uri' => null,
                 'source' => 'minimal',
             ];
         }
@@ -223,6 +226,25 @@ class SaleReceiptService
     /**
      * @param  array<string, mixed>  $hardware
      */
+    /**
+     * The inlined twin of resolveLogoUrl: same precedence, base64 bytes.
+     *
+     * @param  array<string, mixed>  $hardware
+     */
+    private function resolveLogoDataUri(array $hardware): ?string
+    {
+        if (!$hardware['allow_logo_on_sales_receipt']) {
+            return null;
+        }
+
+        $paper = strtolower((string) $hardware['printing_paper_size']);
+        if ($paper === '80mm') {
+            return $hardware['logo_80mm_data_uri'] ?? $hardware['logo_a4_a5_data_uri'] ?? null;
+        }
+
+        return $hardware['logo_a4_a5_data_uri'] ?? $hardware['logo_80mm_data_uri'] ?? null;
+    }
+
     private function resolveLogoUrl(array $hardware): ?string
     {
         if (!$hardware['allow_logo_on_sales_receipt']) {

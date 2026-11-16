@@ -15,6 +15,16 @@ import type { SaleReceiptApiPayload } from "../../../api/salesApi";
 import { buildSaleReceiptHtmlFromApi } from "./saleReceiptPrint";
 import { printReceipt } from "../../../utils/thermalPrint";
 
+interface Props {
+  /** The receipt to show, or null to keep the dialog closed. */
+  receipt: SaleReceiptApiPayload | null;
+  onClose: () => void;
+  /** Print as soon as the preview has rendered, without waiting for a click. */
+  autoPrint?: boolean;
+  /** Overrides the dialog's heading; defaults to Quotation / Sale complete. */
+  label?: string;
+}
+
 const PosReceiptPreviewDialog: React.FC<Props> = ({
   receipt,
   onClose,
@@ -94,9 +104,12 @@ const PosReceiptPreviewDialog: React.FC<Props> = ({
             srcDoc={html}
             onLoad={() => setFrameReady(true)}
             sx={{
-              // 72mm at 96dpi — the exact roll width, so the preview shows the
-              // receipt edge to edge with no dead margin beside it.
-              width: isThermal ? 272 : "100%",
+              // 72mm at 96dpi = 272px — the exact roll width, so the preview
+              // shows the receipt edge to edge with no dead margin beside it.
+              // The extra 17px is a gutter for this iframe's own vertical
+              // scrollbar: without it the scrollbar eats into the 272px body
+              // and clips the right edge of every right-aligned line.
+              width: isThermal ? 272 + 17 : "100%",
               height: "62vh",
               border: "none",
               bgcolor: "#ffffff",

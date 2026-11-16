@@ -20,6 +20,7 @@ class ItemSettingService
         'allow_favorite_items_on_sales_screen',
         'allow_editing_purchase_price_in_inventory_dashboard',
         'allow_total_price_entry_on_sales_screen',
+        'require_barcode_change_pin',
     ];
 
     public function getForUser(User $user): array
@@ -44,12 +45,60 @@ class ItemSettingService
             $setting->update($payload);
         }
 
+        if (array_key_exists('barcode_change_pin', $data)) {
+            $setting->barcode_change_pin = $this->normalizeBarcodePin($data['barcode_change_pin']);
+            $setting->save();
+        }
+
         if (array_key_exists('uom_options', $data)) {
             $setting->uom_options = $this->normalizeUomOptions($data['uom_options']);
             $setting->save();
         }
 
         return $this->formatSetting($setting->fresh());
+    }
+
+    /**
+     * An empty value clears the PIN, which turns the guard off even while the
+     * toggle is on — stated here so that is a deliberate choice, not a bug.
+     */
+    private function normalizeBarcodePin(mixed $pin): ?string
+    {
+        $value = trim((string) ($pin ?? ''));
+
+        if ($value === '') {
+            return null;
+        }
+
+        if (!preg_match('/^[0-9]{4,10}$/', $value)) {
+            throw new \Exception('The barcode PIN must be 4 to 10 digits.');
+        }
+
+        return $value;
+    }
+
+    /**
+     * Whether `$pin` may change a barcode that is already saved.
+     *
+     * Returns true when the guard is off or no PIN has been set, so enabling
+     * the toggle without choosing a PIN never locks anyone out of their own
+     * items.
+     */
+    public function barcodeChangeAllowed(User $user, ?string $pin): bool
+    {
+        $setting = $this->getOrCreateSetting($user);
+
+        if (!$setting->require_barcode_change_pin) {
+            return true;
+        }
+
+        $expected = trim((string) $setting->barcode_change_pin);
+
+        if ($expected === '') {
+            return true;
+        }
+
+        return hash_equals($expected, trim((string) ($pin ?? '')));
     }
 
     /**
@@ -118,6 +167,8 @@ class ItemSettingService
                 'allow_favorite_items_on_sales_screen' => true,
                 'allow_editing_purchase_price_in_inventory_dashboard' => true,
                 'allow_total_price_entry_on_sales_screen' => true,
+                'require_barcode_change_pin' => true,
+                'barcode_change_pin' => null,
                 'uom_options' => self::DEFAULT_UOM_OPTIONS,
             ]
         );
@@ -131,6 +182,11 @@ class ItemSettingService
             $data[$field] = (bool) $setting->{$field};
         }
 
+        // The PIN itself never leaves the server: a value sent to the browser
+        // could be read out of the network tab by the very staff it restricts.
+        // The client is told only whether one is set, and asks the API to
+        // verify an entered PIN.
+        $data['barcode_change_pin_set'] = trim((string) $setting->barcode_change_pin) !== '';
         $data['uom_options'] = $this->resolveUomOptions($setting);
 
         return $data;

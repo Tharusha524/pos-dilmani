@@ -647,6 +647,9 @@ class ItemController extends Controller
             'barcode' => 'nullable|string|max:64',
             'barcode_type' => 'nullable|in:CODE128,EAN13',
             'auto_generate_barcode' => 'nullable|boolean',
+            // Not an item field: the PIN authorising a change to a barcode
+            // that is already saved. ItemService checks it and discards it.
+            'barcode_change_pin' => 'nullable|string|max:20',
             'is_favourite' => 'nullable|boolean',
             'is_active' => 'nullable|boolean',
         ];

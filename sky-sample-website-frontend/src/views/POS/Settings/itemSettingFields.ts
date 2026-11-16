@@ -1,6 +1,11 @@
 import type { ItemSettings } from "../../../api/Settings/itemSettingsApi";
 
-export type ItemSettingFieldKey = keyof Omit<ItemSettings, "id">;
+/** Only the toggleable fields: the read-only "a PIN is set" flag and the
+ *  write-only PIN itself are not rendered as switches. */
+export type ItemSettingFieldKey = keyof Omit<
+  ItemSettings,
+  "id" | "barcode_change_pin_set" | "uom_options"
+>;
 
 export interface ItemSettingFieldDef {
   key: ItemSettingFieldKey;
@@ -60,5 +65,11 @@ export const ITEM_SETTING_FIELDS: ItemSettingFieldDef[] = [
     title: "Allow Total Price Entry on Sales Screen",
     description:
       "Use the item edit dialog to enter the total amount and auto-calculate quantity (Total ÷ Unit Price) on the sales screen.",
+  },
+  {
+    key: "require_barcode_change_pin",
+    title: "Require a PIN to change an existing barcode",
+    description:
+      "Once labels are printed, replacing a barcode makes every printed sticker stop scanning. With this on, changing a barcode that is already saved asks for the PIN below. Creating the first barcode for an item is never blocked.",
   },
 ];

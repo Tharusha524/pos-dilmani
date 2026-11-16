@@ -519,6 +519,8 @@ class ItemService
         $item = $this->findForUser($user, $id);
         $companyId = $item->company_id;
 
+        $this->assertBarcodeChangeAuthorised($user, $item, $data);
+
         if (array_key_exists('item_number', $data)) {
             $itemNumber = trim((string) $data['item_number']);
             if ($itemNumber === '' && !empty($data['auto_generate_item_number'])) {
@@ -629,6 +631,46 @@ class ItemService
         }
 
         return null;
+    }
+
+    /**
+     * Stop an unauthorised edit from replacing a barcode that is already in use.
+     *
+     * By the time an item has a saved barcode its labels may already be on the
+     * shelf. Replacing it makes every one of them scan as "no item found", and
+     * nothing reveals that until a customer is at the till, so the change is
+     * held behind a PIN the admin issues. Only a genuine change is challenged:
+     * an item with no barcode yet, and an edit that leaves the barcode as it
+     * is, both pass straight through, so routine edits are never interrupted.
+     */
+    private function assertBarcodeChangeAuthorised(User $user, Item $item, array $data): void
+    {
+        $current = $this->barcodeService->normalize($item->barcode);
+
+        if ($current === '') {
+            return;
+        }
+
+        if (!array_key_exists('barcode', $data)) {
+            return;
+        }
+
+        $incoming = $this->barcodeService->normalize($data['barcode']);
+
+        if ($incoming === $current) {
+            return;
+        }
+
+        $pin = $data['barcode_change_pin'] ?? null;
+
+        if ($this->itemSettingService->barcodeChangeAllowed($user, is_string($pin) ? $pin : null)) {
+            return;
+        }
+
+        throw new Exception(
+            'This item already has a barcode. Enter the barcode PIN to change it, '
+            . 'or labels already printed will stop scanning.'
+        );
     }
 
     /**

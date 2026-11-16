@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\HardwareSetting;
 use App\Models\User;
+use App\Support\StorageDataUri;
 use Exception;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
@@ -175,6 +176,9 @@ class HardwareSettingService
         $data['letterhead_top_margin_cm'] = $setting->letterhead_top_margin_cm;
         $data['logo_80mm_url'] = $this->resolveFileUrl($setting->logo_80mm_path);
         $data['logo_a4_a5_url'] = $this->resolveFileUrl($setting->logo_a4_a5_path);
+        // Inlined bytes for the printers, which cannot fetch the URLs above.
+        $data['logo_80mm_data_uri'] = StorageDataUri::fromPath($setting->logo_80mm_path);
+        $data['logo_a4_a5_data_uri'] = StorageDataUri::fromPath($setting->logo_a4_a5_path);
 
         return $data;
     }

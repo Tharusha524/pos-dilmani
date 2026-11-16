@@ -139,9 +139,16 @@ export function buildSaleReceiptHtmlFromApi(payload: SaleReceiptApiPayload): str
     email: payload.header.email ?? "",
     tax_id: payload.header.tax_id ?? null,
     registration_number: payload.header.registration_number ?? null,
+    // Inlined bytes first: a printer cannot fetch a remote URL in time, and a
+    // cross-origin one taints the html2canvas raster. The URLs stay as the
+    // fallback for payloads from a backend that does not send the bytes.
     logo_url:
       payload.print_options.allow_logo_on_sales_receipt !== false
-        ? payload.print_options.logo_url ?? payload.header.logo_url ?? null
+        ? payload.print_options.logo_data_uri ??
+          payload.print_options.logo_url ??
+          payload.header.logo_data_uri ??
+          payload.header.logo_url ??
+          null
         : null,
   };
 
@@ -154,7 +161,7 @@ export function buildSaleReceiptHtmlFromApi(payload: SaleReceiptApiPayload): str
       sales_receipt_printout_style: payload.print_options
         .sales_receipt_printout_style as SalesReceiptStyle,
       letterhead_top_margin_cm: payload.print_options.letterhead_top_margin_cm as LetterheadMargin,
-      logo_url: payload.print_options.logo_url,
+      logo_url: payload.print_options.logo_data_uri ?? payload.print_options.logo_url,
       allow_logo_on_sales_receipt: payload.print_options.allow_logo_on_sales_receipt,
     },
   });
@@ -189,7 +196,10 @@ function buildSaleReceiptHtml(
       hw && !hw.allow_logo_on_sales_receipt
         ? null
         : (extras?.options?.logo_url ??
-          (hw?.printing_paper_size === "80mm" ? hw.logo_80mm_url : hw?.logo_a4_a5_url) ??
+          (hw?.printing_paper_size === "80mm"
+            ? hw.logo_80mm_data_uri ?? hw.logo_80mm_url
+            : hw?.logo_a4_a5_data_uri ?? hw?.logo_a4_a5_url) ??
+          header.logo_data_uri ??
           header.logo_url),
     allow_logo_on_sales_receipt:
       hw?.allow_logo_on_sales_receipt ?? extras?.options?.allow_logo_on_sales_receipt ?? true,
@@ -525,9 +535,15 @@ function buildThermalReceiptStyles(marginTop: string, rs?: ReceiptSettings): str
       -webkit-print-color-adjust: exact;
       print-color-adjust: exact;
     }
+    /* The right inset is larger than the left on purpose. A thermal head's
+       real printable area is narrower than the nominal 72mm roll and is not
+       centred on it, so content laid out flush to 72mm loses its right-hand
+       characters on paper. Pulling the right side in keeps the amounts on
+       the roll. Raise the right inset if a printer still shaves the right
+       edge; note this prints left of centre, which is the accepted trade. */
     .rcpt {
       width: 100%;
-      padding: 2mm 2mm 6mm;
+      padding: 2mm 9mm 6mm 2mm;
     }
     .rcpt-logo {
       display: block;
@@ -610,8 +626,14 @@ function buildThermalReceiptStyles(marginTop: string, rs?: ReceiptSettings): str
     .rcpt-totals { font-size: ${fontTotals}px; }
 
     /* Item table */
+    /* Fixed layout keeps the declared column widths authoritative. Auto
+       layout lets a long amount stretch the table past the 72mm roll, which
+       clips the right-hand digits on paper. This must be global, not just on
+       the raster path: the browser-print fallback is laid out to @page 72mm
+       and clips exactly the same way. */
     .rcpt-items-table {
       width: 100%;
+      table-layout: fixed;
       border-collapse: collapse;
       font-size: ${fontItems}px;
     }
@@ -633,7 +655,10 @@ function buildThermalReceiptStyles(marginTop: string, rs?: ReceiptSettings): str
     .rcpt-item-amt-cell {
       text-align: right;
       font-weight: 700;
-      white-space: nowrap;
+      /* Wrap rather than nowrap: an amount that cannot wrap overflows its
+         30% column and pushes the whole table off the right of the roll. */
+      white-space: normal;
+      word-break: break-word;
     }
     .rcpt-item-detail-row td { padding-bottom: ${rowSpacing}px; border-bottom: 1px solid #000; }
     .rcpt-item-detail-cell {
@@ -692,7 +717,7 @@ function buildThermalReceiptStyles(marginTop: string, rs?: ReceiptSettings): str
     }
     @media print {
       html, body { width: 72mm; max-width: 72mm; padding: 0; padding-top: ${marginTop}; }
-      .rcpt { padding: 2mm 2mm 4mm; }
+      .rcpt { padding: 2mm 9mm 4mm 2mm; }
     }
     /* Raster path: the capture runs at exactly 288px so it doubles to the
        head's 576 dots with no fractional scaling to blur the glyph edges.

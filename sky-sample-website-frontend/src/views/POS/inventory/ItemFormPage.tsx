@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -7,6 +7,10 @@ import {
   CardContent,
   Checkbox,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   Divider,
   FormControl,
   FormControlLabel,
@@ -46,7 +50,7 @@ import {
 } from "../../../api/itemsApi";
 import { fetchBranches } from "../../../api/Settings/branchApi";
 import { getInventorySettings } from "../../../api/Settings/inventorySettingsApi";
-import { getItemSettings } from "../../../api/Settings/itemSettingsApi";
+import { getItemSettings, verifyBarcodePin } from "../../../api/Settings/itemSettingsApi";
 import { getFriendlyErrorMessage } from "../../../utils/getFriendlyErrorMessage";
 import { resolveItemImageUrl } from "../../../utils/resolveStorageUrl";
 import PageTitle from "../../../components/PageTitle";
@@ -54,6 +58,7 @@ import { calcPricing } from "./itemFormCalculations";
 import ItemCategoryFormDialog, { type CategorySavedResult } from "./ItemCategoryFormDialog";
 import { DEFAULT_ITEM_PRODUCT_TYPE, ITEM_PRODUCT_TYPES } from "./itemProductTypes";
 import { DEFAULT_UOM_OPTIONS } from "./uomOptions";
+import LockOpenIcon from "@mui/icons-material/LockOpen";
 import BarcodeImage from "../../../components/barcode/BarcodeImage";
 import { barcodeValidationError, normalizeBarcode } from "../../../utils/barcode";
 
@@ -248,6 +253,8 @@ const ItemFormPage: React.FC = () => {
       is_favourite: existingItem.is_favourite ?? false,
       is_active: existingItem.is_active,
     });
+    setSavedBarcode(normalizeBarcode(existingItem.barcode ?? ""));
+    setBarcodeUnlocked(false);
     setImagePreview(resolveItemImageUrl(existingItem));
     setImageFile(null);
   }, [existingItem]);
@@ -274,6 +281,62 @@ const ItemFormPage: React.FC = () => {
   }, [itemSettings, isEdit]);
 
   const [generatingBarcode, setGeneratingBarcode] = useState(false);
+
+  /** The barcode this item was loaded with; "" for a new item. Compared
+   *  against the field to tell a real replacement from an untouched edit. */
+  const [savedBarcode, setSavedBarcode] = useState("");
+  /** Set once the PIN has been accepted, so the dialog is asked for at most
+   *  once per edit rather than on every keystroke. */
+  const [barcodeUnlocked, setBarcodeUnlocked] = useState(false);
+  const [pinDialogOpen, setPinDialogOpen] = useState(false);
+  const [pinValue, setPinValue] = useState("");
+  const [pinError, setPinError] = useState<string | null>(null);
+  const [pinChecking, setPinChecking] = useState(false);
+  /** What to run once the PIN is accepted — replacing or clearing the code. */
+  const pinActionRef = useRef<(() => void) | null>(null);
+
+  /** True when the item already carries a barcode that a change would break. */
+  const barcodeIsProtected =
+    Boolean(itemSettings?.require_barcode_change_pin) &&
+    savedBarcode !== "" &&
+    !barcodeUnlocked;
+
+  /**
+   * Run `action`, asking for the PIN first if this item's barcode is
+   * protected. Printed labels stop scanning the moment a saved barcode
+   * changes, so the confirmation is deliberately in the way.
+   */
+  const withBarcodePin = (action: () => void) => {
+    if (!barcodeIsProtected) {
+      action();
+      return;
+    }
+    pinActionRef.current = action;
+    setPinValue("");
+    setPinError(null);
+    setPinDialogOpen(true);
+  };
+
+  /** Check the typed PIN with the server, then run whatever was waiting. */
+  const confirmBarcodePin = async () => {
+    if (pinValue === "") return;
+    setPinChecking(true);
+    try {
+      const { valid } = await verifyBarcodePin(pinValue);
+      if (!valid) {
+        setPinError("That PIN is not correct.");
+        return;
+      }
+      setBarcodeUnlocked(true);
+      setPinDialogOpen(false);
+      pinActionRef.current?.();
+      pinActionRef.current = null;
+    } catch (err) {
+      setPinError(getFriendlyErrorMessage(err, "Could not check the PIN"));
+    } finally {
+      setPinChecking(false);
+    }
+  };
 
   /**
    * Validated as you type rather than only on save, so a mistyped EAN-13 is
@@ -332,6 +395,13 @@ const ItemFormPage: React.FC = () => {
         sub_category:
           subCategories.find((s) => s.id === form.item_sub_category_id)?.name ?? form.sub_category,
         item_number: useAuto && !form.item_number?.trim() ? "" : form.item_number,
+        // Only when this edit actually replaces a saved barcode. The server
+        // re-checks it; the dialog alone would be bypassable via the API.
+        ...(savedBarcode !== "" &&
+        normalizeBarcode(String(form.barcode ?? "")) !== savedBarcode &&
+        pinValue !== ""
+          ? { barcode_change_pin: pinValue }
+          : {}),
       };
       let saved;
       if (isEdit && itemId) {
@@ -1010,6 +1080,7 @@ const ItemFormPage: React.FC = () => {
                       size="small"
                       label="Barcode"
                       value={form.barcode ?? ""}
+                      disabled={barcodeIsProtected}
                       onChange={(e) => setField("barcode", e.target.value)}
                       onBlur={(e) =>
                         setField("barcode", normalizeBarcode(e.target.value))
@@ -1017,9 +1088,11 @@ const ItemFormPage: React.FC = () => {
                       error={Boolean(barcodeError)}
                       helperText={
                         barcodeError ??
-                        (form.auto_generate_barcode
-                          ? "Leave blank to let the system assign one on save."
-                          : "Enter the code printed on the item.")
+                        (barcodeIsProtected
+                          ? "Locked: labels may already be printed. Use Change to replace it."
+                          : form.auto_generate_barcode
+                            ? "Leave blank to let the system assign one on save."
+                            : "Enter the code printed on the item.")
                       }
                       sx={fieldSx}
                     />
@@ -1051,24 +1124,38 @@ const ItemFormPage: React.FC = () => {
                         variant="outlined"
                         startIcon={<AutorenewIcon />}
                         disabled={generatingBarcode}
-                        onClick={async () => {
-                          setGeneratingBarcode(true);
-                          try {
-                            const next = await getNextBarcode();
-                            setField("barcode", next.barcode);
-                            setField("barcode_type", next.barcode_type);
-                          } catch (err) {
-                            enqueueSnackbar(
-                              getFriendlyErrorMessage(err, "Could not generate a barcode"),
-                              { variant: "error" }
-                            );
-                          } finally {
-                            setGeneratingBarcode(false);
-                          }
-                        }}
+                        onClick={() =>
+                          withBarcodePin(async () => {
+                            setGeneratingBarcode(true);
+                            try {
+                              const next = await getNextBarcode();
+                              setField("barcode", next.barcode);
+                              setField("barcode_type", next.barcode_type);
+                            } catch (err) {
+                              enqueueSnackbar(
+                                getFriendlyErrorMessage(err, "Could not generate a barcode"),
+                                { variant: "error" }
+                              );
+                            } finally {
+                              setGeneratingBarcode(false);
+                            }
+                          })
+                        }
                       >
                         {generatingBarcode ? "Generating…" : "Generate"}
                       </Button>
+                      {barcodeIsProtected && (
+                        <Button
+                          type="button"
+                          size="small"
+                          color="warning"
+                          variant="outlined"
+                          startIcon={<LockOpenIcon />}
+                          onClick={() => withBarcodePin(() => undefined)}
+                        >
+                          Change
+                        </Button>
+                      )}
                       <FormControlLabel
                         control={
                           <Switch
@@ -1218,6 +1305,61 @@ const ItemFormPage: React.FC = () => {
         onClose={() => setCategoryDialogOpen(false)}
         onSaved={handleCategorySaved}
       />
+
+      <Dialog
+        open={pinDialogOpen}
+        onClose={() => setPinDialogOpen(false)}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+          <LockOpenIcon color="warning" />
+          Change this barcode?
+        </DialogTitle>
+        <DialogContent>
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            This item already uses barcode <strong>{savedBarcode}</strong>. Any
+            label already printed with it will stop scanning at the till, and
+            the stock will have to be re-labelled by hand.
+          </Alert>
+          <TextField
+            autoFocus
+            fullWidth
+            size="small"
+            type="password"
+            label="Barcode PIN"
+            inputMode="numeric"
+            autoComplete="off"
+            value={pinValue}
+            onChange={(e) => {
+              setPinValue(e.target.value.replace(/[^0-9]/g, ""));
+              setPinError(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void confirmBarcodePin();
+              }
+            }}
+            error={Boolean(pinError)}
+            helperText={pinError ?? "Ask your administrator for this PIN."}
+            disabled={pinChecking}
+          />
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={() => setPinDialogOpen(false)} disabled={pinChecking}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            color="warning"
+            onClick={() => void confirmBarcodePin()}
+            disabled={pinChecking || pinValue === ""}
+          >
+            {pinChecking ? "Checking…" : "Unlock"}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 };

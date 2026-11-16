@@ -18,6 +18,8 @@ class ItemSetting extends Model
         'allow_favorite_items_on_sales_screen',
         'allow_editing_purchase_price_in_inventory_dashboard',
         'allow_total_price_entry_on_sales_screen',
+        'require_barcode_change_pin',
+        'barcode_change_pin',
         'uom_options',
     ];
 
@@ -33,6 +35,7 @@ class ItemSetting extends Model
             'allow_favorite_items_on_sales_screen' => 'boolean',
             'allow_editing_purchase_price_in_inventory_dashboard' => 'boolean',
             'allow_total_price_entry_on_sales_screen' => 'boolean',
+            'require_barcode_change_pin' => 'boolean',
             'uom_options' => 'array',
         ];
     }

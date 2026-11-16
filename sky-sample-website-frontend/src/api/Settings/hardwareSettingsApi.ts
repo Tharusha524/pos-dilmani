@@ -25,6 +25,9 @@ export interface HardwareSettings {
   customize_label_for_discount: string;
   letterhead_top_margin_cm: LetterheadMargin;
   logo_80mm_url: string | null;
+  /** Inlined twins of the logo URLs; see CompanyPrintHeader.logo_data_uri. */
+  logo_80mm_data_uri?: string | null;
+  logo_a4_a5_data_uri?: string | null;
   logo_a4_a5_url: string | null;
 }
 

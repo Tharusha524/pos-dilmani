@@ -93,6 +93,7 @@ Route::middleware(['auth:sanctum', 'throttle:120,1'])->group(function () {
         // POS settings – item
         Route::get('/settings/item', [ItemSettingController::class, 'show']);
         Route::put('/settings/item', [ItemSettingController::class, 'update']);
+        Route::post('/settings/item/verify-barcode-pin', [ItemSettingController::class, 'verifyBarcodePin']);
 
         // POS settings – inventory
         Route::get('/settings/inventory', [InventorySettingController::class, 'show']);

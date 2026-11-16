@@ -1,5 +1,5 @@
 /** Shown at the bottom of printed POS receipts (sales, purchases, etc.). */
-export const RECEIPT_SOFTWARE_FOOTER = "Software provided by Sky Smart Technologies";
+export const RECEIPT_SOFTWARE_FOOTER = "Developed by DIO Solutions";
 
 export function buildReceiptSoftwareFooterHtml(className = "print-software-footer"): string {
   const text = RECEIPT_SOFTWARE_FOOTER.replace(/&/g, "&amp;")

@@ -75,6 +75,9 @@ export interface Item {
   barcode_type?: BarcodeType;
   /** When true the backend assigns a barcode on save if the field is blank. */
   auto_generate_barcode?: boolean;
+  /** Write-only: authorises replacing a barcode that is already saved.
+   *  Verified server-side and never stored on the item. */
+  barcode_change_pin?: string;
   is_favourite?: boolean;
   is_active: boolean;
   status: string;

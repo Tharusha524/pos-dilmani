@@ -2,6 +2,8 @@
 
 namespace App\Services;
 
+use App\Support\StorageDataUri;
+
 use App\Models\Company;
 use App\Models\User;
 use App\Support\UserSchema;
@@ -173,6 +175,9 @@ class CompanySettingService
         return [
             'company_name' => $formatted['name'],
             'logo_url' => $formatted['logo_url'],
+            // Printers cannot fetch the URL (cross-origin / load race), so the
+            // bytes travel with the payload. See StorageDataUri.
+            'logo_data_uri' => StorageDataUri::fromPath($company->logo_path),
             'address_line' => $this->buildAddressLine($company),
             'email' => $formatted['email'],
             'phone' => $formatted['phone'],

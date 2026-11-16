@@ -11,6 +11,13 @@
 
 declare const qz: any;
 
+declare global {
+  interface Window {
+    /** Set by the QZ Tray script once loadQzScript() has injected it. */
+    qz?: typeof qz;
+  }
+}
+
 // --- html2canvas render -------------------------------------------------------
 
 /** Printable width of an 80mm roll on a TM-T82: 576 dots at 203 dpi. */
@@ -61,6 +68,8 @@ export async function receiptHtmlToBase64(html: string): Promise<string> {
       /* older engines expose no font loading API */
     }
 
+    await imagesSettled(doc);
+
     // Grow the frame to the full receipt so nothing is cropped at capture.
     frame.style.height = `${body.scrollHeight + 8}px`;
 
@@ -75,7 +84,9 @@ export async function receiptHtmlToBase64(html: string): Promise<string> {
       width: captureWidth,
       windowWidth: captureWidth,
       backgroundColor: "#ffffff",
-      useCORS: false,
+      // Logos normally arrive as inlined `data:` URIs, which need no CORS at
+      // all. This stays on for any remote image a receipt may still carry.
+      useCORS: true,
       logging: false,
     });
 
@@ -98,6 +109,35 @@ export async function receiptHtmlToBase64(html: string): Promise<string> {
   } finally {
     if (document.body.contains(frame)) document.body.removeChild(frame);
   }
+}
+
+/**
+ * Resolve once every <img> in `doc` has loaded or failed.
+ *
+ * Printing on a fixed timer raced the logo: `print()` fired first and the
+ * receipt came out without it. A failed image resolves too — a missing logo
+ * must never block a sale receipt — and a 3s ceiling bounds the wait.
+ */
+function imagesSettled(doc: Document, timeoutMs = 3000): Promise<void> {
+  const imgs = Array.from(doc.images);
+  if (imgs.length === 0) return Promise.resolve();
+
+  const pending = imgs
+    .filter((img) => !img.complete || img.naturalWidth === 0)
+    .map(
+      (img) =>
+        new Promise<void>((resolve) => {
+          img.addEventListener("load", () => resolve(), { once: true });
+          img.addEventListener("error", () => resolve(), { once: true });
+        })
+    );
+
+  if (pending.length === 0) return Promise.resolve();
+
+  return Promise.race([
+    Promise.all(pending).then(() => undefined),
+    new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
 }
 
 // --- QZ Tray -----------------------------------------------------------------
@@ -181,7 +221,7 @@ function printViaHiddenIframe(html: string): void {
   doc.write(html);
   doc.close();
   frame.contentWindow!.focus();
-  setTimeout(() => {
+  void imagesSettled(doc).then(() => {
     frame.contentWindow!.print();
     const cleanup = () => {
       if (document.body.contains(frame)) document.body.removeChild(frame);
@@ -189,7 +229,7 @@ function printViaHiddenIframe(html: string): void {
     };
     frame.contentWindow?.addEventListener("afterprint", cleanup);
     setTimeout(cleanup, 60_000);
-  }, 300);
+  });
 }
 
 // --- Main entry point --------------------------------------------------------

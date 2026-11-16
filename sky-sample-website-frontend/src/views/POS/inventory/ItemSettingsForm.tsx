@@ -29,6 +29,10 @@ const ItemSettingsForm: React.FC<ItemSettingsFormProps> = ({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [newUom, setNewUom] = useState("");
   const [uomError, setUomError] = useState<string | null>(null);
+  /** Held apart from `form`: the stored PIN is never sent to the browser, so
+   *  this box starts empty and is only submitted when actually typed into. */
+  const [barcodePin, setBarcodePin] = useState("");
+  const [barcodePinError, setBarcodePinError] = useState<string | null>(null);
 
   const uomOptions = form.uom_options?.length ? form.uom_options : [...DEFAULT_UOM_OPTIONS];
 
@@ -183,11 +187,50 @@ const ItemSettingsForm: React.FC<ItemSettingsFormProps> = ({
           />
         ))}
       </Box>
+      {form.require_barcode_change_pin && (
+        <Paper variant="outlined" sx={{ p: 2, mt: 2 }}>
+          <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
+            Barcode change PIN
+          </Typography>
+          <Typography variant="body2" sx={{ opacity: 0.8, mb: 1.5 }}>
+            4–10 digits. Give it only to staff who are allowed to re-issue a
+            barcode. Leave it blank to allow changes without a PIN.
+          </Typography>
+          <TextField
+            size="small"
+            type="password"
+            inputMode="numeric"
+            autoComplete="new-password"
+            value={barcodePin}
+            onChange={(e) => setBarcodePin(e.target.value.replace(/[^0-9]/g, ""))}
+            placeholder={
+              data?.barcode_change_pin_set ? "A PIN is set — type to replace it" : "No PIN set"
+            }
+            error={Boolean(barcodePinError)}
+            helperText={barcodePinError ?? " "}
+            disabled={saveMutation.isPending}
+            sx={{ maxWidth: 280 }}
+          />
+        </Paper>
+      )}
       {showSaveButton && (
         <Box sx={{ display: "flex", justifyContent: "flex-end", mt: 3 }}>
           <Button
             variant="contained"
-            onClick={() => saveMutation.mutate({ ...form, uom_options: uomOptions })}
+            onClick={() => {
+              if (barcodePin !== "" && !/^[0-9]{4,10}$/.test(barcodePin)) {
+                setBarcodePinError("The PIN must be 4 to 10 digits.");
+                return;
+              }
+              setBarcodePinError(null);
+              saveMutation.mutate({
+                ...form,
+                uom_options: uomOptions,
+                // Omitted when untouched, so saving other settings never
+                // silently wipes a PIN this form was never shown.
+                ...(barcodePin !== "" ? { barcode_change_pin: barcodePin } : {}),
+              });
+            }}
             disabled={saveMutation.isPending}
             sx={{
               bgcolor: "var(--pallet-blue)",

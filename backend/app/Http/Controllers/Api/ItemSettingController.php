@@ -27,6 +27,30 @@ class ItemSettingController extends Controller
         }
     }
 
+    /**
+     * Check a PIN without ever sending the stored one to the browser.
+     *
+     * Always answers 200 with a boolean rather than 403: the item form uses
+     * this to decide whether to unlock its barcode field, and an error status
+     * would be indistinguishable from the request having failed.
+     */
+    public function verifyBarcodePin(Request $request)
+    {
+        $validated = $request->validate([
+            'pin' => 'present|nullable|string|max:20',
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'valid' => $this->itemSettingService->barcodeChangeAllowed(
+                    $request->user(),
+                    $validated['pin'] ?? null
+                ),
+            ],
+        ]);
+    }
+
     public function update(Request $request)
     {
         try {
@@ -40,6 +64,9 @@ class ItemSettingController extends Controller
                 'allow_favorite_items_on_sales_screen' => 'nullable|boolean',
                 'allow_editing_purchase_price_in_inventory_dashboard' => 'nullable|boolean',
                 'allow_total_price_entry_on_sales_screen' => 'nullable|boolean',
+                'require_barcode_change_pin' => 'nullable|boolean',
+                // Nullable AND present-able: an empty string clears the PIN.
+                'barcode_change_pin' => 'present|nullable|string|max:20',
                 'uom_options' => 'nullable|array|min:1|max:30',
                 'uom_options.*' => 'required|string|max:20',
             ]);

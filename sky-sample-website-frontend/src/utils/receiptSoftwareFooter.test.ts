@@ -5,7 +5,7 @@ import {
 
 describe("receiptSoftwareFooter", () => {
   test("exports footer text", () => {
-    expect(RECEIPT_SOFTWARE_FOOTER).toContain("Sky Smart");
+    expect(RECEIPT_SOFTWARE_FOOTER).toContain("DIO Solutions");
   });
 
   test("escapes HTML in footer", () => {

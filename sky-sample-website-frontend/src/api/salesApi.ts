@@ -230,6 +230,7 @@ export interface SaleReceiptApiPayload {
     allow_auto_print: boolean;
     allow_dual_language_print: boolean;
     logo_url: string | null;
+    logo_data_uri?: string | null;
     allow_logo_on_sales_receipt: boolean;
   };
   labels: SaleReceiptLabels;

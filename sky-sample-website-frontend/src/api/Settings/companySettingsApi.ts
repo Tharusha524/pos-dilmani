@@ -21,6 +21,11 @@ export interface CompanySettings {
 export interface CompanyPrintHeader {
   company_name: string;
   logo_url: string | null;
+  /** The logo's bytes inlined as a `data:` URI. Printers cannot fetch
+   *  `logo_url` (cross-origin canvas taint, and a load race before print),
+   *  so this is preferred wherever it is present. Optional so an older
+   *  backend's payload still type-checks. */
+  logo_data_uri?: string | null;
   address_line: string;
   email: string;
   phone: string;
